@@ -130,11 +130,12 @@ export function registerOrchestratorTools(server: McpServer, orchestrator: Paral
     'claim_next_task',
     {
       title: 'Claim next task',
-      description: 'Claim the next runnable task for a worker. Returns null if no task is currently runnable.',
+      description: 'Claim the next runnable task for a worker. Returns null if no task is currently runnable. Pass clientToken to make retries idempotent.',
       inputSchema: {
         workerId: z.string(),
         leaseMs: z.number().int().positive().optional(),
         kinds: z.array(z.string()).optional(),
+        clientToken: z.string().optional(),
       },
     },
     async input => {
@@ -143,6 +144,7 @@ export function registerOrchestratorTools(server: McpServer, orchestrator: Paral
           workerId: input.workerId,
           ...(input.leaseMs !== undefined ? { leaseMs: input.leaseMs } : {}),
           ...(input.kinds !== undefined ? { kinds: input.kinds } : {}),
+          ...(input.clientToken !== undefined ? { clientToken: input.clientToken } : {}),
         })
         return jsonResult({ claim })
       } catch (error) {
@@ -255,7 +257,7 @@ export function registerOrchestratorTools(server: McpServer, orchestrator: Paral
     'complete_task',
     {
       title: 'Complete task',
-      description: 'Mark a running task as completed. Optionally append a new run context snapshot.',
+      description: 'Mark a running task as completed. Optionally append a new run context snapshot. Pass clientToken to make retries idempotent.',
       inputSchema: {
         taskId: z.string(),
         leaseId: z.string(),
@@ -264,6 +266,7 @@ export function registerOrchestratorTools(server: McpServer, orchestrator: Paral
         metadata: jsonValueSchema.optional(),
         nextContext: jsonValueSchema.optional(),
         nextContextLabel: z.string().optional(),
+        clientToken: z.string().optional(),
       },
     },
     async input => {
@@ -276,6 +279,7 @@ export function registerOrchestratorTools(server: McpServer, orchestrator: Paral
           ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
           ...(input.nextContext !== undefined ? { nextContext: input.nextContext } : {}),
           ...(input.nextContextLabel !== undefined ? { nextContextLabel: input.nextContextLabel } : {}),
+          ...(input.clientToken !== undefined ? { clientToken: input.clientToken } : {}),
         })
         return jsonResult({ task })
       } catch (error) {
@@ -288,13 +292,14 @@ export function registerOrchestratorTools(server: McpServer, orchestrator: Paral
     'fail_task',
     {
       title: 'Fail task',
-      description: 'Mark a running task as failed. This is terminal; retries happen via lease expiry, not failTask.',
+      description: 'Mark a running task as failed. This is terminal; retries happen via lease expiry, not failTask. Pass clientToken to make retries idempotent.',
       inputSchema: {
         taskId: z.string(),
         leaseId: z.string(),
         workerId: z.string(),
         error: z.string(),
         metadata: jsonValueSchema.optional(),
+        clientToken: z.string().optional(),
       },
     },
     async input => {
@@ -305,6 +310,7 @@ export function registerOrchestratorTools(server: McpServer, orchestrator: Paral
           workerId: input.workerId,
           error: input.error,
           ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+          ...(input.clientToken !== undefined ? { clientToken: input.clientToken } : {}),
         })
         return jsonResult({ task })
       } catch (error) {
@@ -504,6 +510,124 @@ export function registerOrchestratorTools(server: McpServer, orchestrator: Paral
       try {
         const snapshot = orchestrator.getCurrentContextSnapshot(input.runId)
         return jsonResult({ snapshot })
+      } catch (error) {
+        return errorResult(error)
+      }
+    },
+  )
+
+  const runStatusSchema = z.enum(['pending', 'active', 'waiting', 'completed', 'failed', 'cancelled'])
+
+  server.registerTool(
+    'list_runs',
+    {
+      title: 'List runs',
+      description: 'List runs, optionally filtered by namespace, statuses, externalId, and updated-at range.',
+      inputSchema: {
+        namespace: z.string().optional(),
+        statuses: z.array(runStatusSchema).optional(),
+        externalId: z.string().optional(),
+        updatedAfter: z.string().optional(),
+        updatedBefore: z.string().optional(),
+        limit: z.number().int().positive().max(1000).optional(),
+        offset: z.number().int().nonnegative().optional(),
+        orderBy: z.enum(['created_at', 'updated_at']).optional(),
+        orderDir: z.enum(['asc', 'desc']).optional(),
+      },
+    },
+    async input => {
+      try {
+        const runs = orchestrator.listRuns({
+          ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
+          ...(input.statuses !== undefined ? { statuses: input.statuses } : {}),
+          ...(input.externalId !== undefined ? { externalId: input.externalId } : {}),
+          ...(input.updatedAfter !== undefined ? { updatedAfter: input.updatedAfter } : {}),
+          ...(input.updatedBefore !== undefined ? { updatedBefore: input.updatedBefore } : {}),
+          ...(input.limit !== undefined ? { limit: input.limit } : {}),
+          ...(input.offset !== undefined ? { offset: input.offset } : {}),
+          ...(input.orderBy !== undefined ? { orderBy: input.orderBy } : {}),
+          ...(input.orderDir !== undefined ? { orderDir: input.orderDir } : {}),
+        })
+        return jsonResult({ runs })
+      } catch (error) {
+        return errorResult(error)
+      }
+    },
+  )
+
+  server.registerTool(
+    'list_pending_tasks',
+    {
+      title: 'List pending tasks',
+      description: 'List queued tasks across runs, optionally filtered by runId, kinds, and readyBy cutoff.',
+      inputSchema: {
+        runId: z.string().optional(),
+        kinds: z.array(z.string()).optional(),
+        readyBy: z.string().optional(),
+        limit: z.number().int().positive().max(1000).optional(),
+      },
+    },
+    async input => {
+      try {
+        const tasks = orchestrator.listPendingTasks({
+          ...(input.runId !== undefined ? { runId: input.runId } : {}),
+          ...(input.kinds !== undefined ? { kinds: input.kinds } : {}),
+          ...(input.readyBy !== undefined ? { readyBy: input.readyBy } : {}),
+          ...(input.limit !== undefined ? { limit: input.limit } : {}),
+        })
+        return jsonResult({ tasks })
+      } catch (error) {
+        return errorResult(error)
+      }
+    },
+  )
+
+  server.registerTool(
+    'list_events_since',
+    {
+      title: 'List events since',
+      description: 'Paginate the append-only event log. Returns events and a nextCursor to pass as afterId on the next call.',
+      inputSchema: {
+        afterId: z.number().int().nonnegative().optional(),
+        runId: z.string().optional(),
+        eventTypes: z.array(z.string()).optional(),
+        limit: z.number().int().positive().max(1000).optional(),
+      },
+    },
+    async input => {
+      try {
+        const result = orchestrator.listEventsSince({
+          ...(input.afterId !== undefined ? { afterId: input.afterId } : {}),
+          ...(input.runId !== undefined ? { runId: input.runId } : {}),
+          ...(input.eventTypes !== undefined ? { eventTypes: input.eventTypes } : {}),
+          ...(input.limit !== undefined ? { limit: input.limit } : {}),
+        })
+        return jsonResult(result)
+      } catch (error) {
+        return errorResult(error)
+      }
+    },
+  )
+
+  server.registerTool(
+    'prune_runs',
+    {
+      title: 'Prune runs',
+      description: 'Hard-delete terminal runs older than the cutoff, cascading to tasks, leases, attempts, snapshots, and events.',
+      inputSchema: {
+        olderThan: z.string(),
+        statuses: z.array(runStatusSchema).optional(),
+        limit: z.number().int().positive().max(10_000).optional(),
+      },
+    },
+    async input => {
+      try {
+        const result = orchestrator.pruneRuns({
+          olderThan: input.olderThan,
+          ...(input.statuses !== undefined ? { statuses: input.statuses } : {}),
+          ...(input.limit !== undefined ? { limit: input.limit } : {}),
+        })
+        return jsonResult(result)
       } catch (error) {
         return errorResult(error)
       }

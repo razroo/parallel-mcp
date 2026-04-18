@@ -80,10 +80,14 @@ describe('parallel-mcp MCP server', () => {
         'get_run',
         'get_task',
         'heartbeat_lease',
+        'list_events_since',
+        'list_pending_tasks',
         'list_run_events',
         'list_run_tasks',
+        'list_runs',
         'mark_task_running',
         'pause_task',
+        'prune_runs',
         'release_task',
         'resume_task',
       ].sort(),
@@ -150,6 +154,119 @@ describe('parallel-mcp MCP server', () => {
       claim: { task: { kind: string } } | null
     }
     expect(nextClaim.claim?.task.kind).toBe('site.apply')
+  })
+
+  it('exposes admin tools for listing runs, pending tasks, and paginated events', async () => {
+    const { client, handle } = await connectInMemoryPair()
+    handles.push(handle)
+
+    const runA = (await call(client, 'create_run', { namespace: 'admin' })) as {
+      run: { id: string }
+    }
+    const runB = (await call(client, 'create_run', { namespace: 'admin' })) as {
+      run: { id: string }
+    }
+    await call(client, 'enqueue_task', { runId: runA.run.id, kind: 'x' })
+    await call(client, 'enqueue_task', { runId: runB.run.id, kind: 'y' })
+
+    const runs = (await call(client, 'list_runs', { namespace: 'admin' })) as {
+      runs: Array<{ id: string }>
+    }
+    const runIds = new Set(runs.runs.map(r => r.id))
+    expect(runIds.has(runA.run.id)).toBe(true)
+    expect(runIds.has(runB.run.id)).toBe(true)
+
+    const pending = (await call(client, 'list_pending_tasks', { kinds: ['x'] })) as {
+      tasks: Array<{ kind: string }>
+    }
+    expect(pending.tasks.every(t => t.kind === 'x')).toBe(true)
+    expect(pending.tasks).toHaveLength(1)
+
+    const page1 = (await call(client, 'list_events_since', { limit: 2 })) as {
+      events: Array<{ id: number }>
+      nextCursor: number | null
+    }
+    expect(page1.events).toHaveLength(2)
+    expect(page1.nextCursor).toBe(page1.events.at(-1)!.id)
+
+    const page2 = (await call(client, 'list_events_since', {
+      afterId: page1.nextCursor ?? 0,
+      limit: 2,
+    })) as { events: Array<{ id: number }> }
+    for (const event of page2.events) {
+      expect(event.id).toBeGreaterThan(page1.nextCursor!)
+    }
+  })
+
+  it('makes complete_task idempotent when clientToken is supplied', async () => {
+    const { client, handle } = await connectInMemoryPair()
+    handles.push(handle)
+
+    const run = (await call(client, 'create_run', { namespace: 'idem' })) as {
+      run: { id: string }
+    }
+    const task = (await call(client, 'enqueue_task', {
+      runId: run.run.id,
+      kind: 'k',
+    })) as { task: { id: string } }
+
+    const claim = (await call(client, 'claim_next_task', {
+      workerId: 'w',
+      clientToken: 'claim-1',
+    })) as {
+      claim: { task: { id: string }; lease: { id: string; workerId: string } }
+    }
+    expect(claim.claim.task.id).toBe(task.task.id)
+
+    const replay = (await call(client, 'claim_next_task', {
+      workerId: 'w',
+      clientToken: 'claim-1',
+    })) as {
+      claim: { task: { id: string }; lease: { id: string } }
+    }
+    expect(replay.claim.task.id).toBe(claim.claim.task.id)
+    expect(replay.claim.lease.id).toBe(claim.claim.lease.id)
+
+    const completeArgs = {
+      taskId: task.task.id,
+      leaseId: claim.claim.lease.id,
+      workerId: claim.claim.lease.workerId,
+      output: { ok: true },
+      clientToken: 'complete-1',
+    }
+    const first = (await call(client, 'complete_task', completeArgs)) as {
+      task: { status: string }
+    }
+    expect(first.task.status).toBe('completed')
+
+    const second = (await call(client, 'complete_task', completeArgs)) as {
+      task: { status: string }
+    }
+    expect(second.task.status).toBe('completed')
+  })
+
+  it('prune_runs hard-deletes terminal runs and surfaces the count', async () => {
+    const { client, handle } = await connectInMemoryPair()
+    handles.push(handle)
+
+    const run = (await call(client, 'create_run', { namespace: 'prune' })) as {
+      run: { id: string }
+    }
+    await call(client, 'enqueue_task', { runId: run.run.id, kind: 'k' })
+    await call(client, 'cancel_run', { runId: run.run.id })
+
+    const far = new Date(Date.now() + 60_000).toISOString()
+    const result = (await call(client, 'prune_runs', {
+      olderThan: far,
+      statuses: ['cancelled'],
+    })) as { count: number; prunedRunIds: string[] }
+    expect(result.count).toBe(1)
+    expect(result.prunedRunIds).toContain(run.run.id)
+
+    const after = (await call(client, 'get_run', { runId: run.run.id })) as {
+      run: unknown | null
+    }
+    expect(after.run).toBeNull()
   })
 
   it('surfaces typed errors from the core as MCP tool errors', async () => {
