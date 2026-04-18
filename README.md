@@ -1,5 +1,9 @@
 # @razroo/parallel-mcp
 
+[![npm](https://img.shields.io/npm/v/@razroo/parallel-mcp.svg)](https://www.npmjs.com/package/@razroo/parallel-mcp)
+[![license](https://img.shields.io/npm/l/@razroo/parallel-mcp.svg)](./LICENSE)
+[![node](https://img.shields.io/node/v/@razroo/parallel-mcp.svg)](./package.json)
+
 `@razroo/parallel-mcp` is a durable orchestration core for parallel MCP workloads.
 
 It is not another MCP transport or browser automation server. The package exists to solve the failure mode where live sockets, warm caches, and implicit session defaults become the de facto source of truth for multi-job execution. In `parallel-mcp`, the source of truth is a SQLite database with explicit state transitions, leases, context snapshots, and an append-only event log.
@@ -48,6 +52,8 @@ Task states:
 ```bash
 npm install @razroo/parallel-mcp
 ```
+
+Requires Node.js `>=22`. SQLite persistence is backed by [`better-sqlite3`](https://www.npmjs.com/package/better-sqlite3).
 
 ## Quick start
 
@@ -105,6 +111,47 @@ orchestrator.completeTask({
   nextContextLabel: 'resume.parse.completed',
 })
 ```
+
+## API surface
+
+`ParallelMcpOrchestrator` is a thin facade over `SqliteParallelMcpStore`. Both are exported, along with the full set of record and option types and error classes.
+
+Runs:
+
+- `createRun(options?)`
+- `getRun(runId)`
+- `cancelRun({ runId, reason?, now? })`
+
+Tasks:
+
+- `enqueueTask({ runId, kind, key?, priority?, maxAttempts?, input?, metadata?, dependsOnTaskIds?, ... })`
+- `claimNextTask({ workerId, leaseMs?, kinds?, now? })`
+- `markTaskRunning({ taskId, leaseId, workerId })`
+- `pauseTask({ taskId, leaseId, workerId, status: 'blocked' | 'waiting_input', reason? })`
+- `resumeTask({ taskId })`
+- `completeTask({ taskId, leaseId, workerId, output?, metadata?, nextContext?, nextContextLabel? })`
+- `failTask({ taskId, leaseId, workerId, error, metadata? })`
+- `releaseTask({ taskId, leaseId, workerId, reason? })`
+- `getTask(taskId)`
+- `listRunTasks(runId)`
+
+Leases:
+
+- `heartbeatLease({ taskId, leaseId, workerId, leaseMs? })`
+- `expireLeases(now?)` → `{ expiredTaskIds, count }`
+
+Context and events:
+
+- `appendContextSnapshot({ runId, payload, scope?, label?, taskId?, parentSnapshotId? })`
+- `getCurrentContextSnapshot(runId)`
+- `listRunEvents(runId)`
+
+Errors (all extend `ParallelMcpError`):
+
+- `RecordNotFoundError`
+- `InvalidTransitionError`
+- `LeaseConflictError`
+- `LeaseExpiredError`
 
 ## Suggested adapter boundary
 
