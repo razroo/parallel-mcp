@@ -45,3 +45,41 @@ jobs:
 
       - name: Build server
         run: npm run build:server
+
+  compat-sqlite:
+    name: better-sqlite3 compat floor (v${{ matrix.better-sqlite3 }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22']
+        better-sqlite3: ['11.10.0', '12.9.0']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install base dependencies
+        run: npm ci
+
+      - name: Pin better-sqlite3 to ${{ matrix.better-sqlite3 }}
+        run: npm install better-sqlite3@${{ matrix.better-sqlite3 }} --no-save --workspaces=false
+
+      - name: Build core
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run check
+
+      - name: Test core
+        run: npm test
+
+      - name: Test server
+        run: npm run test:server

@@ -45,7 +45,8 @@
     "test:watch": "vitest",
     "prepublishOnly": "npm run check && npm test && npm run build",
     "pack:check": "npm run prepublishOnly && npm pack --dry-run",
-    "example:fan-out": "tsx examples/fan-out.ts"
+    "example:fan-out": "tsx examples/fan-out.ts",
+    "bench:claims": "tsx bench/claim-throughput.ts"
   },
   "keywords": [
     "mcp",
@@ -55,7 +56,7 @@
     "sqlite"
   ],
   "dependencies": {
-    "better-sqlite3": "^12.9.0"
+    "better-sqlite3": ">=11.0.0 <13.0.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

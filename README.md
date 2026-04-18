@@ -55,7 +55,7 @@ Task states:
 npm install @razroo/parallel-mcp
 ```
 
-Requires Node.js `>=22`. SQLite persistence is backed by [`better-sqlite3`](https://www.npmjs.com/package/better-sqlite3).
+Requires Node.js `>=22`. SQLite persistence is backed by [`better-sqlite3`](https://www.npmjs.com/package/better-sqlite3). The core is tested against `better-sqlite3` `^11 || ^12` — see [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) for the compat matrix.
 
 ## Quick start
 
@@ -249,6 +249,17 @@ Context and events:
 - `appendContextSnapshot({ runId, payload, scope?, label?, taskId?, parentSnapshotId? })`
 - `getCurrentContextSnapshot(runId)`
 - `listRunEvents(runId)`
+- `listEventsSince({ afterId?, runId?, eventTypes?, limit? })` → `{ events, nextCursor }` for paginated / resumable event consumption
+
+Introspection and retention:
+
+- `listRuns({ namespace?, statuses?, externalId?, updatedAfter?, updatedBefore?, limit?, offset?, orderBy?, orderDir? })`
+- `listPendingTasks({ runId?, kinds?, readyBy?, limit? })`
+- `pruneRuns({ olderThan, statuses?, limit? })` → hard-deletes terminal runs and cascades to tasks, leases, attempts, snapshots, and events
+
+Transactions:
+
+- `transaction(fn)` runs `fn` inside an `IMMEDIATE` SQLite transaction so multiple writes commit or roll back as one unit
 
 Workers:
 
@@ -293,7 +304,14 @@ This version ships:
 Next logical additions:
 
 - remote store backends
-- richer event subscription (push stream) in addition to the synchronous `onEvent` hook
+- richer event subscription (push stream) in addition to the synchronous `onEvent` hook and the `listEventsSince` cursor
+
+See also:
+
+- [`docs/lifecycle.md`](./docs/lifecycle.md) — task / run state machine and event types
+- [`docs/failure-modes.md`](./docs/failure-modes.md) — typed errors and how to handle each failure
+- [`docs/authoring-adapters.md`](./docs/authoring-adapters.md) — writing an adapter with `runWorker`
+- [`bench/`](./bench/) — local throughput bench for the claim path
 
 ## MCP server adapter
 
