@@ -13,9 +13,11 @@ It is not another MCP transport or browser automation server. The package exists
 - Durable `runs` and `tasks`
 - Dependency-aware task claiming for parallel workers
 - Lease acquisition, heartbeat, release, and expiry
+- Retry policies with `maxAttempts` enforcement and fixed/exponential backoff
 - Explicit paused states: `blocked` and `waiting_input`
 - Run-level context snapshots instead of implicit shared memory
 - Append-only events for replay, debugging, and auditing
+- Versioned schema migrations
 
 ## What it does not do
 
@@ -112,6 +114,34 @@ orchestrator.completeTask({
 })
 ```
 
+## Retry policy
+
+`enqueueTask` accepts `maxAttempts` and an optional `retry` policy. The core only enforces the policy on lease expiry — `failTask` is always treated as a terminal decision by the worker, and `releaseTask` requeues without consuming an attempt.
+
+```ts
+orchestrator.enqueueTask({
+  runId: run.id,
+  kind: 'site.apply',
+  maxAttempts: 5,
+  retry: {
+    delayMs: 1_000,
+    backoff: 'exponential',
+    maxDelayMs: 30_000,
+  },
+})
+```
+
+When a lease expires:
+
+- `attempt_count >= maxAttempts` → task transitions to `failed` with `error = 'max_attempts_exceeded'`.
+- Otherwise the task is requeued with `not_before = now + computedDelay`. `claimNextTask` will not return tasks whose `not_before` is in the future.
+
+## Concurrency model
+
+The SQLite store is built for **single-process, many-worker** deployments. Claims run inside a transaction with `busy_timeout` set (default 5000ms) and WAL mode enabled; that's sufficient when one Node process owns the database and claims tasks across concurrent async workers.
+
+If you need **multiple processes** pointing at the same `parallel-mcp.db`, you should treat this as an adapter responsibility for now: run a single orchestrator process and expose claim/heartbeat/complete over your transport of choice. A future release will add a conditional-`UPDATE`-with-`RETURNING` claim path for multi-writer safety.
+
 ## API surface
 
 `ParallelMcpOrchestrator` is a thin facade over `SqliteParallelMcpStore`. Both are exported, along with the full set of record and option types and error classes.
@@ -152,6 +182,10 @@ Errors (all extend `ParallelMcpError`):
 - `InvalidTransitionError`
 - `LeaseConflictError`
 - `LeaseExpiredError`
+- `RunTerminalError`
+- `DuplicateTaskKeyError`
+- `MaxAttemptsExceededError`
+- `DependencyCycleError`
 
 ## Suggested adapter boundary
 
@@ -167,19 +201,20 @@ If the worker dies, lease expiry re-queues the task. If a browser crashes, that 
 
 ## Current scope
 
-This first version ships:
+This version ships:
 
-- SQLite persistence
+- SQLite persistence with versioned migrations
 - durable runs/tasks/attempts/leases/events
 - dependency-aware claiming
 - lease expiry and requeue
+- `maxAttempts` enforcement with fixed / exponential backoff
 - context snapshots
 
 Next logical additions:
 
-- retry policies
+- multi-writer-safe claim path for multi-process deployments
 - remote store backends
-- advisory sharding and worker polling helpers
+- worker polling / event subscription helpers
 - MCP adapter package on top of this core
 
 ## Release
