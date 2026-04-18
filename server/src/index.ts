@@ -1,3 +1,5 @@
 export { createParallelMcpServer } from './server.js'
 export type { ParallelMcpServerOptions, ParallelMcpServerHandle } from './server.js'
+export { createParallelMcpHttpServer } from './http.js'
+export type { ParallelMcpHttpServerOptions, ParallelMcpHttpServerHandle } from './http.js'
 export { registerOrchestratorTools } from './tools.js'

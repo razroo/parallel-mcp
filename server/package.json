@@ -16,7 +16,8 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "parallel-mcp-server": "./dist/bin.js"
+    "parallel-mcp-server": "./dist/bin.js",
+    "parallel-mcp-server-http": "./dist/bin-http.js"
   },
   "exports": {
     ".": {
