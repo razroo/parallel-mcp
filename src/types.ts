@@ -219,6 +219,49 @@ export interface ExpireLeaseResult {
   count: number
 }
 
+export interface ListRunsOptions {
+  namespace?: string
+  statuses?: RunStatus[]
+  externalId?: string
+  updatedAfter?: Date | string | number
+  updatedBefore?: Date | string | number
+  limit?: number
+  offset?: number
+  orderBy?: 'created_at' | 'updated_at'
+  orderDir?: 'asc' | 'desc'
+}
+
+export interface ListPendingTasksOptions {
+  runId?: string
+  kinds?: string[]
+  readyBy?: Date | string | number
+  limit?: number
+}
+
+export interface ListEventsSinceOptions {
+  afterId?: number
+  runId?: string
+  eventTypes?: string[]
+  limit?: number
+}
+
+export interface ListEventsResult {
+  events: EventRecord[]
+  nextCursor: number | null
+}
+
+export interface PruneRunsOptions {
+  olderThan: Date | string | number
+  statuses?: RunStatus[]
+  limit?: number
+  now?: Date | string | number
+}
+
+export interface PruneRunsResult {
+  prunedRunIds: string[]
+  count: number
+}
+
 export interface ParallelMcpOptions {
   defaultLeaseMs?: number
   onEvent?: (event: EventRecord) => void

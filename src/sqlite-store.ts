@@ -23,6 +23,12 @@ import type {
   ResumeTaskOptions,
   CreateRunOptions,
   EnqueueTaskOptions,
+  ListEventsResult,
+  ListEventsSinceOptions,
+  ListPendingTasksOptions,
+  ListRunsOptions,
+  PruneRunsOptions,
+  PruneRunsResult,
   ReleaseTaskOptions,
   RunRecord,
   TaskAttemptRecord,
@@ -1051,6 +1057,171 @@ export class SqliteParallelMcpStore {
       ORDER BY id ASC
     `).all(runId) as EventRow[]
     return rows.map(asEventRecord)
+  }
+
+  listRuns(options: ListRunsOptions = {}): RunRecord[] {
+    const clauses: string[] = []
+    const params: unknown[] = []
+
+    if (options.namespace !== undefined) {
+      clauses.push('namespace IS ?')
+      params.push(options.namespace)
+    }
+    if (options.externalId !== undefined) {
+      clauses.push('external_id IS ?')
+      params.push(options.externalId)
+    }
+    if (options.statuses && options.statuses.length > 0) {
+      const placeholders = options.statuses.map(() => '?').join(', ')
+      clauses.push(`status IN (${placeholders})`)
+      params.push(...options.statuses)
+    }
+    if (options.updatedAfter !== undefined) {
+      clauses.push('updated_at >= ?')
+      params.push(toIsoTimestamp(options.updatedAfter))
+    }
+    if (options.updatedBefore !== undefined) {
+      clauses.push('updated_at < ?')
+      params.push(toIsoTimestamp(options.updatedBefore))
+    }
+
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
+    const orderCol = options.orderBy === 'created_at' ? 'created_at' : 'updated_at'
+    const orderDir = options.orderDir === 'asc' ? 'ASC' : 'DESC'
+    const limit = options.limit ?? 100
+    const offset = options.offset ?? 0
+
+    const rows = this.db.prepare(`
+      SELECT *
+      FROM runs
+      ${where}
+      ORDER BY ${orderCol} ${orderDir}, id ASC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset) as RunRow[]
+
+    return rows.map(asRunRecord)
+  }
+
+  listPendingTasks(options: ListPendingTasksOptions = {}): TaskRecord[] {
+    const clauses: string[] = [`status = 'queued'`]
+    const params: unknown[] = []
+
+    if (options.runId !== undefined) {
+      clauses.push('run_id = ?')
+      params.push(options.runId)
+    }
+    if (options.kinds && options.kinds.length > 0) {
+      const placeholders = options.kinds.map(() => '?').join(', ')
+      clauses.push(`kind IN (${placeholders})`)
+      params.push(...options.kinds)
+    }
+    if (options.readyBy !== undefined) {
+      clauses.push('(not_before IS NULL OR not_before <= ?)')
+      params.push(toIsoTimestamp(options.readyBy))
+    }
+
+    const where = `WHERE ${clauses.join(' AND ')}`
+    const limit = options.limit ?? 100
+
+    const rows = this.db.prepare(`
+      SELECT *
+      FROM tasks
+      ${where}
+      ORDER BY priority DESC, created_at ASC
+      LIMIT ?
+    `).all(...params, limit) as TaskRow[]
+
+    return rows.map(row => this.hydrateTaskRecord(row))
+  }
+
+  listEventsSince(options: ListEventsSinceOptions = {}): ListEventsResult {
+    const clauses: string[] = []
+    const params: unknown[] = []
+
+    if (options.afterId !== undefined) {
+      clauses.push('id > ?')
+      params.push(options.afterId)
+    }
+    if (options.runId !== undefined) {
+      clauses.push('run_id = ?')
+      params.push(options.runId)
+    }
+    if (options.eventTypes && options.eventTypes.length > 0) {
+      const placeholders = options.eventTypes.map(() => '?').join(', ')
+      clauses.push(`event_type IN (${placeholders})`)
+      params.push(...options.eventTypes)
+    }
+
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
+    const limit = Math.max(1, options.limit ?? 200)
+
+    const rows = this.db.prepare(`
+      SELECT *
+      FROM events
+      ${where}
+      ORDER BY id ASC
+      LIMIT ?
+    `).all(...params, limit) as EventRow[]
+
+    const events = rows.map(asEventRecord)
+    const last = events.length > 0 ? events[events.length - 1] : undefined
+    const nextCursor = last ? last.id : (options.afterId ?? null)
+    return { events, nextCursor }
+  }
+
+  pruneRuns(options: PruneRunsOptions): PruneRunsResult {
+    const now = toIsoTimestamp(options.now)
+    const cutoff = toIsoTimestamp(options.olderThan)
+    const statuses = options.statuses && options.statuses.length > 0
+      ? options.statuses
+      : ['completed' as const, 'failed' as const, 'cancelled' as const]
+    const limit = options.limit ?? 500
+
+    const prunedRunIds = this.db.transaction(() => {
+      const placeholders = statuses.map(() => '?').join(', ')
+      const candidates = this.db.prepare(`
+        SELECT id
+        FROM runs
+        WHERE status IN (${placeholders})
+          AND updated_at < ?
+        ORDER BY updated_at ASC
+        LIMIT ?
+      `).all(...statuses, cutoff, limit) as Array<{ id: string }>
+
+      const ids: string[] = []
+      for (const row of candidates) {
+        this.db.prepare(`DELETE FROM task_completions WHERE run_id = ?`).run(row.id)
+        this.db.prepare(`DELETE FROM task_leases WHERE run_id = ?`).run(row.id)
+        this.db.prepare(`DELETE FROM task_attempts WHERE run_id = ?`).run(row.id)
+        this.db.prepare(`
+          DELETE FROM task_dependencies
+          WHERE task_id IN (SELECT id FROM tasks WHERE run_id = ?)
+             OR depends_on_task_id IN (SELECT id FROM tasks WHERE run_id = ?)
+        `).run(row.id, row.id)
+        this.db.prepare(`DELETE FROM context_snapshots WHERE run_id = ?`).run(row.id)
+        this.db.prepare(`DELETE FROM events WHERE run_id = ?`).run(row.id)
+        this.db.prepare(`DELETE FROM tasks WHERE run_id = ?`).run(row.id)
+        this.db.prepare(`DELETE FROM runs WHERE id = ?`).run(row.id)
+        ids.push(row.id)
+      }
+
+      if (ids.length > 0) {
+        this.db.prepare(`
+          INSERT INTO events (run_id, task_id, attempt_id, event_type, payload, created_at)
+          SELECT NULL, NULL, NULL, 'runs.pruned', ?, ?
+          WHERE 1 = 0
+        `)
+      }
+
+      return ids
+    })()
+
+    void now
+    return { prunedRunIds, count: prunedRunIds.length }
+  }
+
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn).immediate()
   }
 
   getCurrentContextSnapshot(runId: string): ContextSnapshotRecord | null {

@@ -12,7 +12,13 @@ import type {
   ExpireLeaseResult,
   FailTaskOptions,
   HeartbeatLeaseOptions,
+  ListEventsResult,
+  ListEventsSinceOptions,
+  ListPendingTasksOptions,
+  ListRunsOptions,
   ParallelMcpOptions,
+  PruneRunsOptions,
+  PruneRunsResult,
   ReleaseTaskOptions,
   ResumeTaskOptions,
   RunRecord,
@@ -113,6 +119,26 @@ export class ParallelMcpOrchestrator {
 
   listRunEvents(runId: string): EventRecord[] {
     return this.store.listRunEvents(runId)
+  }
+
+  listRuns(options: ListRunsOptions = {}): RunRecord[] {
+    return this.store.listRuns(options)
+  }
+
+  listPendingTasks(options: ListPendingTasksOptions = {}): TaskRecord[] {
+    return this.store.listPendingTasks(options)
+  }
+
+  listEventsSince(options: ListEventsSinceOptions = {}): ListEventsResult {
+    return this.store.listEventsSince(options)
+  }
+
+  pruneRuns(options: PruneRunsOptions): PruneRunsResult {
+    return this.store.pruneRuns(options)
+  }
+
+  transaction<T>(fn: () => T): T {
+    return this.store.transaction(fn)
   }
 
   getCurrentContextSnapshot(runId: string): ContextSnapshotRecord | null {
