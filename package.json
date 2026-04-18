@@ -31,10 +31,17 @@
   "engines": {
     "node": ">=22"
   },
+  "workspaces": [
+    "server"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "build:server": "npm run build --workspace @razroo/parallel-mcp-server",
+    "build:all": "npm run build && npm run build:server",
+    "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit && npm run check --workspaces --if-present",
     "test": "vitest run",
+    "test:server": "npm run test --workspace @razroo/parallel-mcp-server",
+    "test:all": "npm run test && npm run test:server",
     "test:watch": "vitest",
     "prepublishOnly": "npm run check && npm test && npm run build",
     "pack:check": "npm run prepublishOnly && npm pack --dry-run"
