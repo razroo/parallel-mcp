@@ -215,7 +215,16 @@ Next logical additions:
 - multi-writer-safe claim path for multi-process deployments
 - remote store backends
 - worker polling / event subscription helpers
-- MCP adapter package on top of this core
+
+## MCP server adapter
+
+If you want to drive this orchestrator from an MCP client (Cursor, Claude Desktop, etc.) instead of in-process, the companion package [`@razroo/parallel-mcp-server`](./server) exposes every public orchestrator method as an MCP tool over stdio.
+
+```bash
+npx @razroo/parallel-mcp-server
+```
+
+See [`server/README.md`](./server/README.md) for the full tool reference and embedding guide.
 
 ## Release
 
