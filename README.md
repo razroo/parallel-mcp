@@ -1,6 +1,6 @@
-# parallel-mcp
+# @razroo/parallel-mcp
 
-`parallel-mcp` is a durable orchestration core for parallel MCP workloads.
+`@razroo/parallel-mcp` is a durable orchestration core for parallel MCP workloads.
 
 It is not another MCP transport or browser automation server. The package exists to solve the failure mode where live sockets, warm caches, and implicit session defaults become the de facto source of truth for multi-job execution. In `parallel-mcp`, the source of truth is a SQLite database with explicit state transitions, leases, context snapshots, and an append-only event log.
 
@@ -46,13 +46,13 @@ Task states:
 ## Install
 
 ```bash
-npm install parallel-mcp better-sqlite3
+npm install @razroo/parallel-mcp
 ```
 
 ## Quick start
 
 ```ts
-import { ParallelMcpOrchestrator, SqliteParallelMcpStore } from 'parallel-mcp'
+import { ParallelMcpOrchestrator, SqliteParallelMcpStore } from '@razroo/parallel-mcp'
 
 const store = new SqliteParallelMcpStore({ filename: './parallel-mcp.db' })
 const orchestrator = new ParallelMcpOrchestrator(store, { defaultLeaseMs: 60_000 })
@@ -110,7 +110,7 @@ orchestrator.completeTask({
 
 Use the package like this:
 
-1. An MCP server or worker claims a task from `parallel-mcp`.
+1. An MCP server or worker claims a task from `@razroo/parallel-mcp`.
 2. The worker launches its own isolated execution environment.
 3. The worker heartbeats its lease while work is active.
 4. If the worker needs user input, it pauses the task as `waiting_input`.
@@ -134,3 +134,15 @@ Next logical additions:
 - remote store backends
 - advisory sharding and worker polling helpers
 - MCP adapter package on top of this core
+
+## Release
+
+The repository includes a tag-driven GitHub Actions workflow at `.github/workflows/release.yml`.
+
+- Push a semver tag like `v0.1.0`
+- GitHub Actions runs typecheck, tests, build, and `npm pack`
+- If the tag matches `package.json` version, the workflow publishes `@razroo/parallel-mcp` to npm and creates a GitHub release
+
+Required repository secrets:
+
+- `NPM_TOKEN`: npm automation token with publish access to the `@razroo` scope

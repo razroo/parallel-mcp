@@ -571,11 +571,12 @@ export class SqliteParallelMcpStore {
       assertTaskTransition(task.status, 'completed')
 
       if (options.nextContext !== undefined) {
+        const parentSnapshotId = task.contextSnapshotId ?? this.requireRun(task.runId).currentContextSnapshotId ?? null
         this.appendContextSnapshot({
           runId: task.runId,
           taskId: task.id,
           scope: 'run',
-          parentSnapshotId: task.contextSnapshotId ?? this.requireRun(task.runId).currentContextSnapshotId ?? undefined,
+          ...(parentSnapshotId ? { parentSnapshotId } : {}),
           label: options.nextContextLabel ?? `${task.kind}.completed`,
           payload: options.nextContext,
           now,
