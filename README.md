@@ -136,6 +136,40 @@ When a lease expires:
 - `attempt_count >= maxAttempts` → task transitions to `failed` with `error = 'max_attempts_exceeded'`.
 - Otherwise the task is requeued with `not_before = now + computedDelay`. `claimNextTask` will not return tasks whose `not_before` is in the future.
 
+## Worker loop
+
+The package ships a `runWorker` helper so callers don't have to hand-roll the claim / heartbeat / complete loop.
+
+```ts
+import { ParallelMcpOrchestrator, SqliteParallelMcpStore, runWorker } from '@razroo/parallel-mcp'
+
+const orchestrator = new ParallelMcpOrchestrator(new SqliteParallelMcpStore({ filename: './parallel-mcp.db' }))
+
+const worker = runWorker({
+  orchestrator,
+  workerId: 'worker-1',
+  kinds: ['site.apply'],
+  leaseMs: 30_000,
+  handler: async ({ task, heartbeat, signal }) => {
+    heartbeat()
+    const result = await doTheWork(task.input, { signal })
+    return { status: 'completed', output: result }
+  },
+})
+
+process.on('SIGTERM', () => worker.stop())
+await worker.stopped
+```
+
+Handler return values map 1:1 to orchestrator state transitions:
+
+- `{ status: 'completed', output?, metadata?, nextContext?, nextContextLabel? }` → `completeTask`
+- `{ status: 'failed', error, metadata? }` → `failTask` (terminal; retries happen via lease expiry, not `failTask`)
+- `{ status: 'paused', pauseAs: 'blocked' | 'waiting_input', reason? }` → `pauseTask`
+- `{ status: 'released', reason? }` → `releaseTask` (requeues without consuming an attempt)
+
+If the handler throws, the task is failed with the error message. An `onError` option is available for observability.
+
 ## Concurrency model
 
 The SQLite store is built for **single-process, many-worker** deployments. Claims run inside a transaction with `busy_timeout` set (default 5000ms) and WAL mode enabled; that's sufficient when one Node process owns the database and claims tasks across concurrent async workers.
@@ -175,6 +209,10 @@ Context and events:
 - `appendContextSnapshot({ runId, payload, scope?, label?, taskId?, parentSnapshotId? })`
 - `getCurrentContextSnapshot(runId)`
 - `listRunEvents(runId)`
+
+Workers:
+
+- `runWorker({ orchestrator, workerId, handler, kinds?, leaseMs?, heartbeatIntervalMs?, pollIntervalMs?, idleBackoffMs?, idleMaxBackoffMs?, signal?, onError?, expireLeasesOnPoll? })` → `{ stop(), stopped, workerId }`
 
 Errors (all extend `ParallelMcpError`):
 

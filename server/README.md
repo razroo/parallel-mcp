@@ -51,7 +51,31 @@ Point your MCP client (Cursor, Claude Desktop, etc.) at that binary. For example
 }
 ```
 
+## Run as a Streamable HTTP server
+
+The package also ships `parallel-mcp-server-http`, which serves the same tool surface over the MCP [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) transport — useful for remote deployments where stdio is not an option.
+
+```bash
+PARALLEL_MCP_DB=./parallel-mcp.db \
+PARALLEL_MCP_PORT=3333 \
+PARALLEL_MCP_HOST=127.0.0.1 \
+PARALLEL_MCP_TOKEN=some-shared-secret \
+npx parallel-mcp-server-http
+```
+
+Environment variables:
+
+- `PARALLEL_MCP_DB` — SQLite filename (default `:memory:`)
+- `PARALLEL_MCP_PORT` — listening port (default `3333`)
+- `PARALLEL_MCP_HOST` — bind address (default `127.0.0.1`)
+- `PARALLEL_MCP_PATH` — MCP endpoint path (default `/mcp`)
+- `PARALLEL_MCP_TOKEN` — optional. When set, every request must include `Authorization: Bearer <token>` or the server responds `401`.
+
+MCP clients connect with `new StreamableHTTPClientTransport(new URL('http://host:port/mcp'))`.
+
 ## Embed in your own server
+
+### Stdio
 
 ```ts
 import { createParallelMcpServer } from '@razroo/parallel-mcp-server'
@@ -65,7 +89,23 @@ const handle = createParallelMcpServer({
 await handle.server.connect(new StdioServerTransport())
 ```
 
-You can also pass in an existing `SqliteParallelMcpStore` or `ParallelMcpOrchestrator` — useful if you want to share one store between an HTTP surface and the MCP surface.
+### HTTP
+
+```ts
+import { createParallelMcpHttpServer } from '@razroo/parallel-mcp-server'
+
+const handle = createParallelMcpHttpServer({
+  storeOptions: { filename: './parallel-mcp.db' },
+  port: 3333,
+  host: '0.0.0.0',
+  authToken: process.env.PARALLEL_MCP_TOKEN,
+})
+
+const { url } = await handle.listen()
+console.log(`parallel-mcp MCP server listening at ${url}`)
+```
+
+Both factories accept an existing `SqliteParallelMcpStore` or `ParallelMcpOrchestrator` — useful if you want to share one store between an HTTP surface, a stdio surface, and in-process workers.
 
 ## Tool reference
 
