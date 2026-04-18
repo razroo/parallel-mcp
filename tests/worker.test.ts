@@ -141,4 +141,44 @@ describe('runWorker', () => {
     await worker.stopped
     expect(true).toBe(true)
   })
+
+  it('releases an in-flight task when drainTimeoutMs elapses after stop()', async () => {
+    const orchestrator = createOrchestrator()
+    instances.push(orchestrator)
+
+    const run = orchestrator.createRun({ namespace: 'worker-drain' })
+    const task = orchestrator.enqueueTask({ runId: run.id, kind: 'work' })
+
+    let finishHandler = (): void => {}
+    let startedResolver = (): void => {}
+    const handlerStarted = new Promise<void>(resolve => {
+      startedResolver = resolve
+    })
+
+    const worker = runWorker({
+      orchestrator,
+      workerId: 'w-drain',
+      pollIntervalMs: 1,
+      idleBackoffMs: 5,
+      drainTimeoutMs: 25,
+      handler: () => {
+        startedResolver()
+        return new Promise<{ status: 'completed' }>(resolve => {
+          finishHandler = () => resolve({ status: 'completed' })
+        })
+      },
+    })
+    workers.push(worker)
+
+    await handlerStarted
+
+    worker.stop()
+    await worker.stopped
+
+    const requeued = orchestrator.getTask(task.id)
+    expect(requeued?.status).toBe('queued')
+    expect(requeued?.leaseId).toBeNull()
+
+    finishHandler()
+  })
 })

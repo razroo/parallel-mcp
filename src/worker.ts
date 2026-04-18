@@ -35,6 +35,7 @@ export interface RunWorkerOptions {
   signal?: AbortSignal
   onError?: (error: unknown, task: TaskRecord | null) => void
   expireLeasesOnPoll?: boolean
+  drainTimeoutMs?: number
 }
 
 export interface WorkerHandle {
@@ -76,6 +77,7 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
     signal: externalSignal,
     onError,
     expireLeasesOnPoll = true,
+    drainTimeoutMs,
   } = options
 
   const controller = new AbortController()
@@ -120,7 +122,16 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
       }
 
       idleDelay = idleBackoffMs
-      await runOneTask(orchestrator, workerId, handler, claim, signal, effectiveHeartbeatMs, onError)
+      await runOneTask(
+        orchestrator,
+        workerId,
+        handler,
+        claim,
+        signal,
+        effectiveHeartbeatMs,
+        drainTimeoutMs,
+        onError,
+      )
 
       if (!signal.aborted && pollIntervalMs > 0) {
         await sleep(pollIntervalMs, signal)
@@ -135,6 +146,8 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
   }
 }
 
+const DRAIN_TIMEOUT = Symbol('drain-timeout')
+
 async function runOneTask(
   orchestrator: ParallelMcpOrchestrator,
   workerId: string,
@@ -142,6 +155,7 @@ async function runOneTask(
   claim: ClaimTaskResult,
   signal: AbortSignal,
   heartbeatIntervalMs: number,
+  drainTimeoutMs: number | undefined,
   onError?: (error: unknown, task: TaskRecord | null) => void,
 ): Promise<void> {
   let task = claim.task
@@ -177,14 +191,34 @@ async function runOneTask(
     requestHeartbeat()
   }, heartbeatIntervalMs)
 
+  const handlerPromise = Promise.resolve().then(async () => handler({
+    task,
+    lease,
+    workerId,
+    signal,
+    heartbeat: requestHeartbeat,
+  }))
+
   try {
-    const result = await handler({
-      task,
-      lease,
-      workerId,
-      signal,
-      heartbeat: requestHeartbeat,
-    })
+    const racePromise: Promise<WorkerHandleResult | typeof DRAIN_TIMEOUT> = drainTimeoutMs !== undefined
+      ? Promise.race([handlerPromise, drainWatchdog(signal, drainTimeoutMs)])
+      : handlerPromise
+
+    const result = await racePromise
+    if (result === DRAIN_TIMEOUT) {
+      try {
+        orchestrator.releaseTask({
+          taskId: task.id,
+          leaseId: lease.id,
+          workerId,
+          reason: 'worker_drain_timeout',
+        })
+      } catch (error) {
+        onError?.(error, task)
+      }
+      handlerPromise.catch(error => onError?.(error, task))
+      return
+    }
     applyResult(orchestrator, workerId, task, lease, result)
   } catch (error) {
     onError?.(error, task)
@@ -204,6 +238,22 @@ async function runOneTask(
       heartbeatTimer = null
     }
   }
+}
+
+function drainWatchdog(signal: AbortSignal, drainTimeoutMs: number): Promise<typeof DRAIN_TIMEOUT> {
+  return new Promise(resolve => {
+    if (signal.aborted) {
+      setTimeout(() => resolve(DRAIN_TIMEOUT), drainTimeoutMs)
+      return
+    }
+    signal.addEventListener(
+      'abort',
+      () => {
+        setTimeout(() => resolve(DRAIN_TIMEOUT), drainTimeoutMs)
+      },
+      { once: true },
+    )
+  })
 }
 
 function applyResult(
