@@ -1,8 +1,14 @@
 import Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import { RecordNotFoundError, LeaseConflictError, LeaseExpiredError } from './errors.js'
+import {
+  RecordNotFoundError,
+  LeaseConflictError,
+  LeaseExpiredError,
+  RunTerminalError,
+  DuplicateTaskKeyError,
+} from './errors.js'
 import { deriveRunStatus, assertTaskTransition } from './state-machine.js'
-import { SCHEMA_SQL } from './schema.js'
+import { runMigrations } from './migrations.js'
 import type {
   AppendContextSnapshotOptions,
   CancelRunOptions,
@@ -48,6 +54,10 @@ interface TaskRow {
   priority: number
   max_attempts: number | null
   attempt_count: number
+  retry_delay_ms: number | null
+  retry_backoff: 'fixed' | 'exponential' | null
+  retry_max_delay_ms: number | null
+  not_before: string | null
   input: string | null
   output: string | null
   metadata: string | null
@@ -128,6 +138,20 @@ function parseJson<T extends JsonValue | null>(value: string | null): T {
   return JSON.parse(value) as T
 }
 
+function computeNotBefore(task: TaskRecord, nowIso: string): string | null {
+  if (task.retryDelayMs === null || task.retryDelayMs <= 0) return null
+  const nowMs = new Date(nowIso).getTime()
+  const attempt = Math.max(1, task.attemptCount)
+  let delay = task.retryDelayMs
+  if (task.retryBackoff === 'exponential') {
+    delay = task.retryDelayMs * 2 ** (attempt - 1)
+  }
+  if (task.retryMaxDelayMs !== null && task.retryMaxDelayMs > 0) {
+    delay = Math.min(delay, task.retryMaxDelayMs)
+  }
+  return new Date(nowMs + delay).toISOString()
+}
+
 function asRunRecord(row: RunRow): RunRecord {
   return {
     id: row.id,
@@ -201,6 +225,7 @@ function asEventRecord(row: EventRow): EventRecord {
 export interface SqliteParallelMcpStoreOptions {
   filename?: string
   database?: Database.Database
+  busyTimeoutMs?: number
 }
 
 export class SqliteParallelMcpStore {
@@ -212,6 +237,7 @@ export class SqliteParallelMcpStore {
     this.ownsDatabase = options.database === undefined
     this.db.pragma('foreign_keys = ON')
     this.db.pragma('journal_mode = WAL')
+    this.db.pragma(`busy_timeout = ${options.busyTimeoutMs ?? 5000}`)
     this.migrate()
   }
 
@@ -220,7 +246,7 @@ export class SqliteParallelMcpStore {
   }
 
   migrate(): void {
-    this.db.exec(SCHEMA_SQL)
+    runMigrations(this.db)
   }
 
   createRun(options: CreateRunOptions = {}): RunRecord {
@@ -272,7 +298,7 @@ export class SqliteParallelMcpStore {
   enqueueTask(options: EnqueueTaskOptions): TaskRecord {
     const run = this.requireRun(options.runId)
     if (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled') {
-      throw new Error(`Run ${run.id} is terminal and cannot accept new tasks`)
+      throw new RunTerminalError(run.id, run.status)
     }
 
     const taskId = options.id ?? randomUUID()
@@ -280,7 +306,19 @@ export class SqliteParallelMcpStore {
     const dependencies = options.dependsOnTaskIds ?? []
 
     this.db.transaction(() => {
+      if (options.key !== undefined) {
+        const existing = this.db.prepare(`
+          SELECT id FROM tasks WHERE run_id = ? AND task_key = ?
+        `).get(options.runId, options.key) as { id: string } | undefined
+        if (existing) {
+          throw new DuplicateTaskKeyError(options.runId, options.key)
+        }
+      }
+
       if (dependencies.length > 0) {
+        if (dependencies.includes(taskId)) {
+          throw new Error(`Task ${taskId} cannot depend on itself`)
+        }
         const rows = this.db.prepare(`
           SELECT id
           FROM tasks
@@ -295,11 +333,13 @@ export class SqliteParallelMcpStore {
       this.db.prepare(`
         INSERT INTO tasks (
           id, run_id, task_key, kind, status, priority, max_attempts, attempt_count,
+          retry_delay_ms, retry_backoff, retry_max_delay_ms, not_before,
           input, output, metadata, error, context_snapshot_id, lease_id, leased_by, lease_expires_at,
           created_at, updated_at, started_at, completed_at
         )
         VALUES (
           @id, @runId, @taskKey, @kind, 'queued', @priority, @maxAttempts, 0,
+          @retryDelayMs, @retryBackoff, @retryMaxDelayMs, NULL,
           @input, NULL, @metadata, NULL, @contextSnapshotId, NULL, NULL, NULL,
           @createdAt, @updatedAt, NULL, NULL
         )
@@ -310,6 +350,9 @@ export class SqliteParallelMcpStore {
         kind: options.kind,
         priority: options.priority ?? 0,
         maxAttempts: options.maxAttempts ?? null,
+        retryDelayMs: options.retry?.delayMs ?? null,
+        retryBackoff: options.retry?.backoff ?? null,
+        retryMaxDelayMs: options.retry?.maxDelayMs ?? null,
         input: jsonText(options.input),
         metadata: jsonText(options.metadata),
         contextSnapshotId: options.contextSnapshotId ?? run.currentContextSnapshotId,
@@ -350,6 +393,8 @@ export class SqliteParallelMcpStore {
         JOIN runs r ON r.id = t.run_id
         WHERE t.status = 'queued'
           AND r.status NOT IN ('completed', 'failed', 'cancelled')
+          AND (t.not_before IS NULL OR t.not_before <= @now)
+          AND (t.max_attempts IS NULL OR t.attempt_count < t.max_attempts)
           AND NOT EXISTS (
             SELECT 1
             FROM task_dependencies d
@@ -358,14 +403,17 @@ export class SqliteParallelMcpStore {
               AND dep.status != 'completed'
           )
       `
-      const params: Array<string> = []
+      const params: Record<string, string> = { now }
       if (kinds.length > 0) {
-        sql += ` AND t.kind IN (${kinds.map(() => '?').join(',')})`
-        params.push(...kinds)
+        const placeholders = kinds.map((_, idx) => `@kind${idx}`)
+        sql += ` AND t.kind IN (${placeholders.join(',')})`
+        kinds.forEach((kind, idx) => {
+          params[`kind${idx}`] = kind
+        })
       }
       sql += ' ORDER BY t.priority DESC, t.created_at ASC LIMIT 1'
 
-      const row = this.db.prepare(sql).get(...params) as TaskRow | undefined
+      const row = this.db.prepare(sql).get(params) as TaskRow | undefined
       if (!row) return null
 
       assertTaskTransition(row.status, 'leased')
@@ -409,6 +457,7 @@ export class SqliteParallelMcpStore {
             lease_id = @leaseId,
             leased_by = @workerId,
             lease_expires_at = @leaseExpiresAt,
+            not_before = NULL,
             updated_at = @updatedAt
         WHERE id = @taskId
       `).run({
@@ -848,16 +897,6 @@ export class SqliteParallelMcpStore {
         const attempt = this.requireAttempt(lease.attemptId)
 
         this.db.prepare(`
-          UPDATE tasks
-          SET status = 'queued',
-              lease_id = NULL,
-              leased_by = NULL,
-              lease_expires_at = NULL,
-              updated_at = ?
-          WHERE id = ?
-        `).run(now, task.id)
-
-        this.db.prepare(`
           UPDATE task_attempts
           SET status = 'expired', ended_at = COALESCE(ended_at, ?)
           WHERE id = ?
@@ -869,11 +908,47 @@ export class SqliteParallelMcpStore {
           WHERE id = ?
         `).run(now, now, lease.id)
 
-        this.insertEvent(task.runId, task.id, attempt.id, 'task.lease_expired', {
-          workerId: task.leasedBy,
-          previousStatus: task.status,
-          leaseId: lease.id,
-        }, now)
+        const exhausted = task.maxAttempts !== null && task.attemptCount >= task.maxAttempts
+        if (exhausted) {
+          this.db.prepare(`
+            UPDATE tasks
+            SET status = 'failed',
+                error = 'max_attempts_exceeded',
+                lease_id = NULL,
+                leased_by = NULL,
+                lease_expires_at = NULL,
+                not_before = NULL,
+                updated_at = ?,
+                completed_at = ?
+            WHERE id = ?
+          `).run(now, now, task.id)
+
+          this.insertEvent(task.runId, task.id, attempt.id, 'task.failed', {
+            workerId: task.leasedBy,
+            error: 'max_attempts_exceeded',
+            attemptCount: task.attemptCount,
+            maxAttempts: task.maxAttempts,
+          }, now)
+        } else {
+          const notBefore = computeNotBefore(task, now)
+          this.db.prepare(`
+            UPDATE tasks
+            SET status = 'queued',
+                lease_id = NULL,
+                leased_by = NULL,
+                lease_expires_at = NULL,
+                not_before = ?,
+                updated_at = ?
+            WHERE id = ?
+          `).run(notBefore, now, task.id)
+
+          this.insertEvent(task.runId, task.id, attempt.id, 'task.lease_expired', {
+            workerId: task.leasedBy,
+            previousStatus: task.status,
+            leaseId: lease.id,
+            notBefore,
+          }, now)
+        }
         this.recomputeRunStatus(task.runId, now)
         expiredTaskIds.push(task.id)
       }
@@ -990,6 +1065,10 @@ export class SqliteParallelMcpStore {
       priority: row.priority,
       maxAttempts: row.max_attempts,
       attemptCount: row.attempt_count,
+      retryDelayMs: row.retry_delay_ms,
+      retryBackoff: row.retry_backoff,
+      retryMaxDelayMs: row.retry_max_delay_ms,
+      notBefore: row.not_before,
       input: parseJson(row.input),
       output: parseJson(row.output),
       metadata: parseJson(row.metadata),

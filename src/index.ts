@@ -1,4 +1,5 @@
 export * from './errors.js'
+export * from './migrations.js'
 export * from './orchestrator.js'
 export * from './sqlite-store.js'
 export * from './types.js'

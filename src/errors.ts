@@ -24,3 +24,27 @@ export class LeaseExpiredError extends ParallelMcpError {
     super(`Lease for task ${taskId} has already expired`)
   }
 }
+
+export class RunTerminalError extends ParallelMcpError {
+  constructor(runId: string, status: string) {
+    super(`Run ${runId} is ${status} and cannot accept new tasks`)
+  }
+}
+
+export class DuplicateTaskKeyError extends ParallelMcpError {
+  constructor(runId: string, key: string) {
+    super(`Task with key ${key} already exists in run ${runId}`)
+  }
+}
+
+export class MaxAttemptsExceededError extends ParallelMcpError {
+  constructor(taskId: string, attempts: number) {
+    super(`Task ${taskId} exceeded max attempts (${attempts})`)
+  }
+}
+
+export class DependencyCycleError extends ParallelMcpError {
+  constructor(message: string) {
+    super(message)
+  }
+}

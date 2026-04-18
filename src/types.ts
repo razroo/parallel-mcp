@@ -29,6 +29,14 @@ export interface RunRecord {
   updatedAt: string
 }
 
+export type RetryBackoff = 'fixed' | 'exponential'
+
+export interface RetryPolicy {
+  delayMs?: number
+  backoff?: RetryBackoff
+  maxDelayMs?: number
+}
+
 export interface TaskRecord {
   id: string
   runId: string
@@ -38,6 +46,10 @@ export interface TaskRecord {
   priority: number
   maxAttempts: number | null
   attemptCount: number
+  retryDelayMs: number | null
+  retryBackoff: RetryBackoff | null
+  retryMaxDelayMs: number | null
+  notBefore: string | null
   input: JsonValue | null
   output: JsonValue | null
   metadata: JsonValue | null
@@ -118,6 +130,7 @@ export interface EnqueueTaskOptions {
   kind: string
   priority?: number
   maxAttempts?: number
+  retry?: RetryPolicy
   input?: JsonValue
   metadata?: JsonValue
   contextSnapshotId?: string
