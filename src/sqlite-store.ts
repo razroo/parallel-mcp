@@ -98,6 +98,7 @@ interface LeaseRow {
   expires_at: string
   heartbeat_at: string | null
   released_at: string | null
+  client_token: string | null
 }
 
 interface ContextSnapshotRow {
@@ -194,6 +195,7 @@ function asTaskLeaseRecord(row: LeaseRow): TaskLeaseRecord {
     expiresAt: row.expires_at,
     heartbeatAt: row.heartbeat_at,
     releasedAt: row.released_at,
+    clientToken: row.client_token,
   }
 }
 
@@ -228,9 +230,12 @@ export interface SqliteParallelMcpStoreOptions {
   busyTimeoutMs?: number
 }
 
+export type EventListener = (event: EventRecord) => void
+
 export class SqliteParallelMcpStore {
   readonly db: Database.Database
   private readonly ownsDatabase: boolean
+  private eventListeners: EventListener[] = []
 
   constructor(options: SqliteParallelMcpStoreOptions = {}) {
     this.db = options.database ?? new Database(options.filename ?? ':memory:')
@@ -239,6 +244,13 @@ export class SqliteParallelMcpStore {
     this.db.pragma('journal_mode = WAL')
     this.db.pragma(`busy_timeout = ${options.busyTimeoutMs ?? 5000}`)
     this.migrate()
+  }
+
+  addEventListener(listener: EventListener): () => void {
+    this.eventListeners.push(listener)
+    return () => {
+      this.eventListeners = this.eventListeners.filter(existing => existing !== listener)
+    }
   }
 
   close(): void {
@@ -383,6 +395,16 @@ export class SqliteParallelMcpStore {
     const now = toIsoTimestamp(options.now)
     const expiresAt = toIsoTimestamp(new Date(new Date(now).getTime() + (options.leaseMs ?? 30_000)))
     const kinds = options.kinds ?? []
+    const clientToken = options.clientToken ?? null
+
+    if (clientToken !== null) {
+      const existing = this.db.prepare(`
+        SELECT id FROM task_leases WHERE client_token = ?
+      `).get(clientToken) as { id: string } | undefined
+      if (existing) {
+        return this.rehydrateLease(existing.id)
+      }
+    }
 
     return this.db.transaction(() => {
       this.expireLeases({ now })
@@ -420,6 +442,30 @@ export class SqliteParallelMcpStore {
       const attemptId = randomUUID()
       const leaseId = randomUUID()
 
+      const takenRows = this.db.prepare(`
+        UPDATE tasks
+        SET status = 'leased',
+            attempt_count = attempt_count + 1,
+            lease_id = @leaseId,
+            leased_by = @workerId,
+            lease_expires_at = @leaseExpiresAt,
+            not_before = NULL,
+            updated_at = @updatedAt
+        WHERE id = @taskId
+          AND status = 'queued'
+          AND lease_id IS NULL
+      `).run({
+        taskId: row.id,
+        leaseId,
+        workerId: options.workerId,
+        leaseExpiresAt: expiresAt,
+        updatedAt: now,
+      }).changes
+
+      if (takenRows !== 1) {
+        return null
+      }
+
       this.db.prepare(`
         INSERT INTO task_attempts (
           id, run_id, task_id, worker_id, status, leased_at, started_at, ended_at, lease_expires_at, error, output, metadata
@@ -436,9 +482,9 @@ export class SqliteParallelMcpStore {
 
       this.db.prepare(`
         INSERT INTO task_leases (
-          id, run_id, task_id, attempt_id, worker_id, status, acquired_at, expires_at, heartbeat_at, released_at
+          id, run_id, task_id, attempt_id, worker_id, status, acquired_at, expires_at, heartbeat_at, released_at, client_token
         )
-        VALUES (@id, @runId, @taskId, @attemptId, @workerId, 'active', @acquiredAt, @expiresAt, @heartbeatAt, NULL)
+        VALUES (@id, @runId, @taskId, @attemptId, @workerId, 'active', @acquiredAt, @expiresAt, @heartbeatAt, NULL, @clientToken)
       `).run({
         id: leaseId,
         runId: row.run_id,
@@ -448,24 +494,7 @@ export class SqliteParallelMcpStore {
         acquiredAt: now,
         expiresAt,
         heartbeatAt: now,
-      })
-
-      this.db.prepare(`
-        UPDATE tasks
-        SET status = 'leased',
-            attempt_count = attempt_count + 1,
-            lease_id = @leaseId,
-            leased_by = @workerId,
-            lease_expires_at = @leaseExpiresAt,
-            not_before = NULL,
-            updated_at = @updatedAt
-        WHERE id = @taskId
-      `).run({
-        taskId: row.id,
-        leaseId,
-        workerId: options.workerId,
-        leaseExpiresAt: expiresAt,
-        updatedAt: now,
+        clientToken,
       })
 
       this.insertEvent(row.run_id, row.id, attemptId, 'task.claimed', {
@@ -481,7 +510,17 @@ export class SqliteParallelMcpStore {
         attempt: this.requireAttempt(attemptId),
         lease: this.requireLease(leaseId),
       }
-    })()
+    }).immediate()
+  }
+
+  private rehydrateLease(leaseId: string): ClaimTaskResult {
+    const lease = this.requireLease(leaseId)
+    return {
+      run: this.requireRun(lease.runId),
+      task: this.requireTask(lease.taskId),
+      attempt: this.requireAttempt(lease.attemptId),
+      lease,
+    }
   }
 
   heartbeatLease(options: HeartbeatLeaseOptions): TaskLeaseRecord {
@@ -614,6 +653,10 @@ export class SqliteParallelMcpStore {
 
   completeTask(options: CompleteTaskOptions): TaskRecord {
     const now = toIsoTimestamp(options.now)
+    if (options.clientToken !== undefined) {
+      const prior = this.lookupCompletion(options.clientToken, options.taskId, 'completed')
+      if (prior) return prior
+    }
     return this.db.transaction(() => {
       const task = this.requireTask(options.taskId)
       const active = this.assertActiveLease(task, options.leaseId, options.workerId, now)
@@ -680,6 +723,9 @@ export class SqliteParallelMcpStore {
         workerId: options.workerId,
         output: options.output ?? null,
       }, now)
+      if (options.clientToken !== undefined) {
+        this.recordCompletion(options.clientToken, task.id, task.runId, 'completed', now)
+      }
       this.recomputeRunStatus(task.runId, now)
       return this.requireTask(task.id)
     })()
@@ -687,6 +733,10 @@ export class SqliteParallelMcpStore {
 
   failTask(options: FailTaskOptions): TaskRecord {
     const now = toIsoTimestamp(options.now)
+    if (options.clientToken !== undefined) {
+      const prior = this.lookupCompletion(options.clientToken, options.taskId, 'failed')
+      if (prior) return prior
+    }
     return this.db.transaction(() => {
       const task = this.requireTask(options.taskId)
       const active = this.assertActiveLease(task, options.leaseId, options.workerId, now)
@@ -740,6 +790,9 @@ export class SqliteParallelMcpStore {
         workerId: options.workerId,
         error: options.error,
       }, now)
+      if (options.clientToken !== undefined) {
+        this.recordCompletion(options.clientToken, task.id, task.runId, 'failed', now)
+      }
       this.recomputeRunStatus(task.runId, now)
       return this.requireTask(task.id)
     })()
@@ -1093,10 +1146,28 @@ export class SqliteParallelMcpStore {
     payload: JsonValue,
     createdAt: string,
   ): void {
-    this.db.prepare(`
+    const info = this.db.prepare(`
       INSERT INTO events (run_id, task_id, attempt_id, event_type, payload, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(runId, taskId, attemptId, eventType, JSON.stringify(payload), createdAt)
+
+    if (this.eventListeners.length === 0) return
+    const record: EventRecord = {
+      id: Number(info.lastInsertRowid),
+      runId,
+      taskId,
+      attemptId,
+      eventType,
+      payload,
+      createdAt,
+    }
+    for (const listener of this.eventListeners) {
+      try {
+        listener(record)
+      } catch {
+        // Listeners are observability callbacks; swallow to avoid breaking durable writes.
+      }
+    }
   }
 
   private recomputeRunStatus(runId: string, now: string): RunRecord {
@@ -1127,6 +1198,39 @@ export class SqliteParallelMcpStore {
     }
 
     return this.requireRun(runId)
+  }
+
+  private lookupCompletion(clientToken: string, taskId: string, expectedOutcome: 'completed' | 'failed'): TaskRecord | null {
+    const row = this.db.prepare(`
+      SELECT task_id, outcome
+      FROM task_completions
+      WHERE client_token = ?
+    `).get(clientToken) as { task_id: string; outcome: string } | undefined
+    if (!row) return null
+    if (row.task_id !== taskId) {
+      throw new Error(
+        `clientToken ${clientToken} was already used for task ${row.task_id}; refusing to reuse it for task ${taskId}`,
+      )
+    }
+    if (row.outcome !== expectedOutcome) {
+      throw new Error(
+        `clientToken ${clientToken} already recorded a ${row.outcome} outcome for task ${taskId}; refusing to re-apply as ${expectedOutcome}`,
+      )
+    }
+    return this.requireTask(taskId)
+  }
+
+  private recordCompletion(
+    clientToken: string,
+    taskId: string,
+    runId: string,
+    outcome: 'completed' | 'failed',
+    now: string,
+  ): void {
+    this.db.prepare(`
+      INSERT INTO task_completions (client_token, task_id, run_id, outcome, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(clientToken, taskId, runId, outcome, now)
   }
 
   private assertActiveLease(task: TaskRecord, leaseId: string, workerId: string, now: string): {

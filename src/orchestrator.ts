@@ -23,13 +23,21 @@ import type {
 export class ParallelMcpOrchestrator {
   readonly store: SqliteParallelMcpStore
   readonly defaultLeaseMs: number
+  private removeEventListener: (() => void) | null = null
 
   constructor(store = new SqliteParallelMcpStore(), options: ParallelMcpOptions = {}) {
     this.store = store
     this.defaultLeaseMs = options.defaultLeaseMs ?? 30_000
+    if (options.onEvent) {
+      this.removeEventListener = this.store.addEventListener(options.onEvent)
+    }
   }
 
   close(): void {
+    if (this.removeEventListener) {
+      this.removeEventListener()
+      this.removeEventListener = null
+    }
     this.store.close()
   }
 

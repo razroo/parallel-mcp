@@ -91,6 +91,7 @@ export interface TaskLeaseRecord {
   expiresAt: string
   heartbeatAt: string | null
   releasedAt: string | null
+  clientToken: string | null
 }
 
 export interface ContextSnapshotRecord {
@@ -142,6 +143,7 @@ export interface ClaimTaskOptions {
   workerId: string
   leaseMs?: number
   kinds?: string[]
+  clientToken?: string
   now?: Date | string | number
 }
 
@@ -177,11 +179,13 @@ export interface CompleteTaskOptions extends ActiveLeaseTaskOptions {
   metadata?: JsonValue
   nextContext?: JsonValue
   nextContextLabel?: string
+  clientToken?: string
 }
 
 export interface FailTaskOptions extends ActiveLeaseTaskOptions {
   error: string
   metadata?: JsonValue
+  clientToken?: string
 }
 
 export interface ReleaseTaskOptions extends ActiveLeaseTaskOptions {
@@ -217,4 +221,5 @@ export interface ExpireLeaseResult {
 
 export interface ParallelMcpOptions {
   defaultLeaseMs?: number
+  onEvent?: (event: EventRecord) => void
 }

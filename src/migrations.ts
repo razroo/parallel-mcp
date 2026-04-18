@@ -34,6 +34,37 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    id: 3,
+    name: 'leases_client_token_idempotency',
+    up: db => {
+      const leaseCols = db.prepare(`PRAGMA table_info(task_leases)`).all() as Array<{ name: string }>
+      if (!leaseCols.some(column => column.name === 'client_token')) {
+        db.exec(`ALTER TABLE task_leases ADD COLUMN client_token TEXT`)
+      }
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS task_leases_client_token_unique
+          ON task_leases(client_token)
+          WHERE client_token IS NOT NULL
+      `)
+
+      const completionsExists = db
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'task_completions'`)
+        .get()
+      if (!completionsExists) {
+        db.exec(`
+          CREATE TABLE task_completions (
+            client_token TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+            outcome TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS task_completions_task_idx ON task_completions(task_id);
+        `)
+      }
+    },
+  },
 ]
 
 export function runMigrations(db: Database.Database): void {

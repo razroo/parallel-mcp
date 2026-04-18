@@ -81,10 +81,24 @@ CREATE TABLE IF NOT EXISTS task_leases (
   acquired_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   heartbeat_at TEXT,
-  released_at TEXT
+  released_at TEXT,
+  client_token TEXT
 );
 
 CREATE INDEX IF NOT EXISTS task_leases_task_idx ON task_leases(task_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS task_leases_client_token_unique
+  ON task_leases(client_token)
+  WHERE client_token IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS task_completions (
+  client_token TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  outcome TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS task_completions_task_idx ON task_completions(task_id);
 
 CREATE TABLE IF NOT EXISTS context_snapshots (
   id TEXT PRIMARY KEY,
