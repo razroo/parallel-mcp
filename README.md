@@ -172,9 +172,49 @@ If the handler throws, the task is failed with the error message. An `onError` o
 
 ## Concurrency model
 
-The SQLite store is built for **single-process, many-worker** deployments. Claims run inside a transaction with `busy_timeout` set (default 5000ms) and WAL mode enabled; that's sufficient when one Node process owns the database and claims tasks across concurrent async workers.
+The SQLite store is built for single-process, many-worker deployments and is safe to open concurrently from multiple processes pointing at the same database file:
 
-If you need **multiple processes** pointing at the same `parallel-mcp.db`, you should treat this as an adapter responsibility for now: run a single orchestrator process and expose claim/heartbeat/complete over your transport of choice. A future release will add a conditional-`UPDATE`-with-`RETURNING` claim path for multi-writer safety.
+- `journal_mode = WAL` and `busy_timeout` (default 5000ms) on every connection.
+- `claimNextTask` runs inside a `BEGIN IMMEDIATE` transaction, so every candidate `SELECT` is serialized with writers.
+- The actual transition to `leased` is a conditional `UPDATE ... WHERE status = 'queued' AND lease_id IS NULL`, and the caller double-checks the affected row count. Two concurrent orchestrators racing for the same task will only ever succeed once; the loser returns `null` and polls again.
+- `claimNextTask` also accepts an optional `clientToken`. If a lease with that token already exists, the same `{ task, attempt, lease }` is returned instead of claiming a second task. That keeps MCP tool calls retry-safe across flaky transports.
+
+## Idempotency
+
+`completeTask` and `failTask` both accept an optional `clientToken`. The first successful call writes a row to `task_completions`; subsequent calls with the same token return the existing task record instead of re-applying the transition. Reusing a token for a different task, or a different outcome, throws — that's a caller bug, not a retry.
+
+```ts
+orchestrator.completeTask({
+  taskId: task.id,
+  leaseId: claim.lease.id,
+  workerId: 'worker-1',
+  output: { ok: true },
+  clientToken: 'apply-candidate-42-attempt-1',
+})
+```
+
+## Observability
+
+`ParallelMcpOrchestrator` accepts an `onEvent` hook that is called synchronously after every durable event is written to the `events` table. Listener errors are swallowed so they can't corrupt the commit path.
+
+```ts
+const orchestrator = new ParallelMcpOrchestrator(store, {
+  defaultLeaseMs: 60_000,
+  onEvent: event => {
+    metrics.increment(`parallel_mcp.${event.eventType}`, { runId: event.runId })
+  },
+})
+```
+
+## Examples
+
+The `examples/` directory contains runnable demos that exercise the full surface end-to-end.
+
+```bash
+npm run example:fan-out
+```
+
+`examples/fan-out.ts` spins up three concurrent `runWorker` loops against an in-memory store, fans out a batch of `fetch` tasks with retry policy, and prints the `onEvent` stream as they flow to a terminal run state. See [`examples/README.md`](./examples/README.md).
 
 ## API surface
 
@@ -189,12 +229,12 @@ Runs:
 Tasks:
 
 - `enqueueTask({ runId, kind, key?, priority?, maxAttempts?, input?, metadata?, dependsOnTaskIds?, ... })`
-- `claimNextTask({ workerId, leaseMs?, kinds?, now? })`
+- `claimNextTask({ workerId, leaseMs?, kinds?, clientToken?, now? })`
 - `markTaskRunning({ taskId, leaseId, workerId })`
 - `pauseTask({ taskId, leaseId, workerId, status: 'blocked' | 'waiting_input', reason? })`
 - `resumeTask({ taskId })`
-- `completeTask({ taskId, leaseId, workerId, output?, metadata?, nextContext?, nextContextLabel? })`
-- `failTask({ taskId, leaseId, workerId, error, metadata? })`
+- `completeTask({ taskId, leaseId, workerId, output?, metadata?, nextContext?, nextContextLabel?, clientToken? })`
+- `failTask({ taskId, leaseId, workerId, error, metadata?, clientToken? })`
 - `releaseTask({ taskId, leaseId, workerId, reason? })`
 - `getTask(taskId)`
 - `listRunTasks(runId)`
@@ -212,7 +252,9 @@ Context and events:
 
 Workers:
 
-- `runWorker({ orchestrator, workerId, handler, kinds?, leaseMs?, heartbeatIntervalMs?, pollIntervalMs?, idleBackoffMs?, idleMaxBackoffMs?, signal?, onError?, expireLeasesOnPoll? })` → `{ stop(), stopped, workerId }`
+- `runWorker({ orchestrator, workerId, handler, kinds?, leaseMs?, heartbeatIntervalMs?, pollIntervalMs?, idleBackoffMs?, idleMaxBackoffMs?, drainTimeoutMs?, signal?, onError?, expireLeasesOnPoll? })` → `{ stop(), stopped, workerId }`
+
+When `drainTimeoutMs` is set, calling `stop()` while a handler is still running gives the handler that long to finish. If it does not, `runWorker` calls `releaseTask` so the task returns to `queued` and another worker can pick it up. The stored handler promise is still awaited in the background so its side effects can unwind cleanly.
 
 Errors (all extend `ParallelMcpError`):
 
@@ -250,9 +292,8 @@ This version ships:
 
 Next logical additions:
 
-- multi-writer-safe claim path for multi-process deployments
 - remote store backends
-- worker polling / event subscription helpers
+- richer event subscription (push stream) in addition to the synchronous `onEvent` hook
 
 ## MCP server adapter
 
