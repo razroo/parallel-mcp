@@ -29,39 +29,82 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Validate tag matches package version
+      - name: Validate tag matches every workspace version
         id: version
         shell: bash
         run: |
-          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
-          if [[ "${GITHUB_REF_NAME}" != "v${PACKAGE_VERSION}" ]]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match package version v${PACKAGE_VERSION}" >&2
+          CORE_VERSION="$(node -p "require('./package.json').version")"
+          SERVER_VERSION="$(node -p "require('./server/package.json').version")"
+          TESTKIT_VERSION="$(node -p "require('./testkit/package.json').version")"
+          if [[ "${GITHUB_REF_NAME}" != "v${CORE_VERSION}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match core version v${CORE_VERSION}" >&2
             exit 1
           fi
-          echo "package_version=${PACKAGE_VERSION}" >> "${GITHUB_OUTPUT}"
+          if [[ "${SERVER_VERSION}" != "${CORE_VERSION}" ]]; then
+            echo "server version (${SERVER_VERSION}) must match core version (${CORE_VERSION})" >&2
+            exit 1
+          fi
+          if [[ "${TESTKIT_VERSION}" != "${CORE_VERSION}" ]]; then
+            echo "testkit version (${TESTKIT_VERSION}) must match core version (${CORE_VERSION})" >&2
+            exit 1
+          fi
+          echo "package_version=${CORE_VERSION}" >> "${GITHUB_OUTPUT}"
 
-      - name: Check
+      - name: Check (all workspaces)
         run: npm run check
 
-      - name: Test
-        run: npm test
+      - name: Test (all workspaces)
+        run: npm run test:all
 
-      - name: Build
-        run: npm run build
+      - name: Build (all workspaces)
+        run: npm run build:all
 
-      - name: Pack
-        id: pack
+      - name: Pack core
+        id: pack_core
         shell: bash
         run: |
           PACKAGE_TGZ="$(npm pack)"
           echo "package_tgz=${PACKAGE_TGZ}" >> "${GITHUB_OUTPUT}"
 
-      - name: Publish to npm
+      - name: Pack server
+        id: pack_server
+        shell: bash
+        working-directory: server
+        run: |
+          PACKAGE_TGZ="$(npm pack)"
+          echo "package_tgz=server/${PACKAGE_TGZ}" >> "${GITHUB_OUTPUT}"
+
+      - name: Pack testkit
+        id: pack_testkit
+        shell: bash
+        working-directory: testkit
+        run: |
+          PACKAGE_TGZ="$(npm pack)"
+          echo "package_tgz=testkit/${PACKAGE_TGZ}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish core to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+      - name: Publish server to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: server
+        run: npm publish --access public --provenance
+
+      - name: Publish testkit to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: testkit
         run: npm publish --access public --provenance
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${GITHUB_REF_NAME}" "${{ steps.pack.outputs.package_tgz }}" --generate-notes
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "${{ steps.pack_core.outputs.package_tgz }}" \
+            "${{ steps.pack_server.outputs.package_tgz }}" \
+            "${{ steps.pack_testkit.outputs.package_tgz }}" \
+            --generate-notes

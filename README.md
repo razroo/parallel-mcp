@@ -263,9 +263,12 @@ Transactions:
 
 Workers:
 
-- `runWorker({ orchestrator, workerId, handler, kinds?, leaseMs?, heartbeatIntervalMs?, pollIntervalMs?, idleBackoffMs?, idleMaxBackoffMs?, drainTimeoutMs?, signal?, onError?, expireLeasesOnPoll? })` → `{ stop(), stopped, workerId }`
+- `runWorker({ orchestrator, workerId, handler, kinds?, leaseMs?, heartbeatIntervalMs?, pollIntervalMs?, idleBackoffMs?, idleMaxBackoffMs?, drainTimeoutMs?, signal?, onError?, expireLeasesOnPoll?, installSignalHandlers? })` → `{ stop(), stopped, workerId }`
+- `scheduleExpireLeases({ orchestrator, intervalMs, signal?, onTick?, onError?, installSignalHandlers?, runImmediately? })` → `{ stop(), stopped }` — standalone maintenance loop that calls `expireLeases()` on a timer.
 
 When `drainTimeoutMs` is set, calling `stop()` while a handler is still running gives the handler that long to finish. If it does not, `runWorker` calls `releaseTask` so the task returns to `queued` and another worker can pick it up. The stored handler promise is still awaited in the background so its side effects can unwind cleanly.
+
+Pass `installSignalHandlers: true` to `runWorker` or `scheduleExpireLeases` when the loop owns the process — it attaches `SIGINT` / `SIGTERM` handlers that call `stop()` once and removes them on exit.
 
 Errors (all extend `ParallelMcpError`):
 
@@ -311,6 +314,7 @@ See also:
 - [`docs/lifecycle.md`](./docs/lifecycle.md) — task / run state machine and event types
 - [`docs/failure-modes.md`](./docs/failure-modes.md) — typed errors and how to handle each failure
 - [`docs/authoring-adapters.md`](./docs/authoring-adapters.md) — writing an adapter with `runWorker`
+- [`testkit/`](./testkit) — `@razroo/parallel-mcp-testkit`, a drop-in Vitest conformance suite for alternative adapter implementations
 - [`bench/`](./bench/) — local throughput bench for the claim path
 
 ## MCP server adapter

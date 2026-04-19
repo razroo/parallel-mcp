@@ -1,6 +1,6 @@
 {
   "name": "@razroo/parallel-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Durable orchestration core for parallel MCP workloads",
   "license": "MIT",
   "type": "module",
@@ -32,16 +32,19 @@
     "node": ">=22"
   },
   "workspaces": [
-    "server"
+    "server",
+    "testkit"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:server": "npm run build --workspace @razroo/parallel-mcp-server",
-    "build:all": "npm run build && npm run build:server",
+    "build:testkit": "npm run build --workspace @razroo/parallel-mcp-testkit",
+    "build:all": "npm run build && npm run build:server && npm run build:testkit",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit && npm run check --workspaces --if-present",
     "test": "vitest run",
     "test:server": "npm run test --workspace @razroo/parallel-mcp-server",
-    "test:all": "npm run test && npm run test:server",
+    "test:testkit": "npm run test --workspace @razroo/parallel-mcp-testkit",
+    "test:all": "npm run test && npm run test:server && npm run test:testkit",
     "test:watch": "vitest",
     "prepublishOnly": "npm run check && npm test && npm run build",
     "pack:check": "npm run prepublishOnly && npm pack --dry-run",
