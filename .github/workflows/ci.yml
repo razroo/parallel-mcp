@@ -43,8 +43,14 @@ jobs:
       - name: Test server
         run: npm run test:server
 
+      - name: Test testkit (conformance suite against reference adapter)
+        run: npm run test:testkit
+
       - name: Build server
         run: npm run build:server
+
+      - name: Build testkit
+        run: npm run build:testkit
 
   compat-sqlite:
     name: better-sqlite3 compat floor (v${{ matrix.better-sqlite3 }})
@@ -83,3 +89,6 @@ jobs:
 
       - name: Test server
         run: npm run test:server
+
+      - name: Test testkit
+        run: npm run test:testkit
