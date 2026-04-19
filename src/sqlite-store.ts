@@ -6,6 +6,8 @@ import {
   LeaseExpiredError,
   RunTerminalError,
   DuplicateTaskKeyError,
+  DependencyCycleError,
+  InvalidTransitionError,
 } from './errors.js'
 import { deriveRunStatus, assertTaskTransition } from './state-machine.js'
 import { runMigrations } from './migrations.js'
@@ -230,14 +232,30 @@ function asEventRecord(row: EventRow): EventRecord {
   }
 }
 
+/** Construction options for {@link SqliteParallelMcpStore}. */
 export interface SqliteParallelMcpStoreOptions {
+  /** File path to open. Defaults to `:memory:`. Ignored when `database` is supplied. */
   filename?: string
+  /** Pre-built `better-sqlite3` database handle. When provided, the caller owns lifecycle. */
   database?: Database.Database
+  /** `busy_timeout` in ms for SQLite lock contention. Defaults to 5000. */
   busyTimeoutMs?: number
 }
 
+/** Observer for durable events emitted by the store. */
 export type EventListener = (event: EventRecord) => void
 
+/**
+ * Durable, transactional persistence layer backing {@link import('./orchestrator.js').ParallelMcpOrchestrator}.
+ *
+ * Every public method is synchronous and either commits fully or throws —
+ * there is no partial state visible between callers. Safe for multi-writer
+ * workloads: concurrent processes can open the same file and race on claims.
+ *
+ * Most applications should depend on the orchestrator; reach for the store
+ * directly only when you need raw SQL access (via `store.db`), custom
+ * transactions, or you are writing an alternative orchestrator facade.
+ */
 export class SqliteParallelMcpStore {
   readonly db: Database.Database
   private readonly ownsDatabase: boolean
@@ -252,6 +270,12 @@ export class SqliteParallelMcpStore {
     this.migrate()
   }
 
+  /**
+   * Register a synchronous observer for every durable event the store emits.
+   * Listener exceptions are swallowed so observability cannot break writes.
+   *
+   * @returns a function that removes the listener when called.
+   */
   addEventListener(listener: EventListener): () => void {
     this.eventListeners.push(listener)
     return () => {
@@ -259,10 +283,15 @@ export class SqliteParallelMcpStore {
     }
   }
 
+  /**
+   * Close the underlying SQLite handle. No-op when the caller supplied their
+   * own `database` in the constructor.
+   */
   close(): void {
     if (this.ownsDatabase) this.db.close()
   }
 
+  /** Apply any pending schema migrations. Invoked automatically from the constructor. */
   migrate(): void {
     runMigrations(this.db)
   }
@@ -335,7 +364,7 @@ export class SqliteParallelMcpStore {
 
       if (dependencies.length > 0) {
         if (dependencies.includes(taskId)) {
-          throw new Error(`Task ${taskId} cannot depend on itself`)
+          throw new DependencyCycleError(`Task ${taskId} cannot depend on itself`)
         }
         const rows = this.db.prepare(`
           SELECT id
@@ -641,7 +670,7 @@ export class SqliteParallelMcpStore {
     return this.db.transaction(() => {
       const task = this.requireTask(options.taskId)
       if (task.status !== 'blocked' && task.status !== 'waiting_input') {
-        throw new Error(`Task ${task.id} is not paused`)
+        throw new InvalidTransitionError('task', task.status, 'queued')
       }
       assertTaskTransition(task.status, 'queued')
 
@@ -1220,6 +1249,11 @@ export class SqliteParallelMcpStore {
     return { prunedRunIds, count: prunedRunIds.length }
   }
 
+  /**
+   * Run `fn` in a SQLite `IMMEDIATE` transaction. Every durable write made
+   * inside commits or rolls back atomically; throwing from `fn` rolls back.
+   * Use for composite operations that must be all-or-nothing.
+   */
   transaction<T>(fn: () => T): T {
     return this.db.transaction(fn).immediate()
   }
