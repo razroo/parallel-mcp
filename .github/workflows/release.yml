@@ -59,8 +59,8 @@ jobs:
       - name: Test (all workspaces)
         run: npm run test:all
 
-      - name: Build server + testkit
-        run: npm run build:server && npm run build:testkit
+      - name: Build server + testkit + postgres adapter
+        run: npm run build:server && npm run build:testkit && npm run build:postgres
 
       - name: Pack core
         id: pack_core

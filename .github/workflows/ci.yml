@@ -46,11 +46,17 @@ jobs:
       - name: Test testkit (conformance suite against reference adapter)
         run: npm run test:testkit
 
+      - name: Test postgres adapter (unit / schema tests)
+        run: npm run test:postgres
+
       - name: Build server
         run: npm run build:server
 
       - name: Build testkit
         run: npm run build:testkit
+
+      - name: Build postgres adapter
+        run: npm run build:postgres
 
   compat-sqlite:
     name: better-sqlite3 compat floor (v${{ matrix.better-sqlite3 }})

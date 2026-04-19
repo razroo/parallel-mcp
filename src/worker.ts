@@ -1,5 +1,5 @@
 import type { ParallelMcpOrchestrator } from './orchestrator.js'
-import type { ClaimTaskResult, ExpireLeaseResult, JsonValue, TaskRecord } from './types.js'
+import type { ClaimTaskResult, ExpireLeaseResult, JsonValue, TaskLeaseRecord, TaskRecord } from './types.js'
 
 /** Outcome a {@link WorkerHandler} returns to tell `runWorker` what to do next. */
 export interface WorkerHandleResult {
@@ -21,10 +21,49 @@ export interface WorkerHandlerContext {
   lease: ClaimTaskResult['lease']
   /** The worker id that won the claim. */
   workerId: string
-  /** Aborted when the worker is asked to stop. Honor this for long-running I/O. */
+  /**
+   * Aborted when **either** the worker is asked to stop **or** the run
+   * containing this task is cancelled via `orchestrator.cancelRun()`. Honor
+   * this for long-running I/O so cancellation propagates promptly.
+   *
+   * This is the composition of:
+   *   - the worker-wide stop signal,
+   *   - an external `signal` passed to `runWorker`,
+   *   - a per-task run-cancellation signal sourced from the event log.
+   */
   signal: AbortSignal
   /** Manually bump the lease. Rarely needed — `runWorker` heartbeats on its own timer. */
   heartbeat: (leaseMs?: number) => void
+}
+
+/**
+ * Observer hooks for structured logging / metrics. Every callback is
+ * optional and synchronous; exceptions inside a callback are routed to
+ * `onError` so observability cannot break the worker loop.
+ */
+export interface WorkerObservers {
+  /** Fires whenever `claimNextTask` returns a task. */
+  onClaim?: (event: { task: TaskRecord; lease: TaskLeaseRecord; workerId: string }) => void
+  /** Fires right before the user handler is invoked. */
+  onHandlerStart?: (event: { task: TaskRecord; workerId: string }) => void
+  /**
+   * Fires after the user handler settles (resolved or thrown). `durationMs`
+   * is the wall-clock time spent inside the handler.
+   */
+  onHandlerEnd?: (event: {
+    task: TaskRecord
+    workerId: string
+    durationMs: number
+    outcome: WorkerHandleResult | { status: 'threw'; error: unknown } | { status: 'drain_timeout' }
+  }) => void
+  /** Fires after each successful heartbeat bump of a task's lease. */
+  onHeartbeat?: (event: { task: TaskRecord; lease: TaskLeaseRecord; workerId: string }) => void
+  /**
+   * Fires when the run containing the currently-executing task is
+   * cancelled. The handler's `signal` has already been aborted before this
+   * fires; this hook is a hint for structured logs.
+   */
+  onRunCancelled?: (event: { runId: string; task: TaskRecord; workerId: string }) => void
 }
 
 /**
@@ -35,7 +74,7 @@ export interface WorkerHandlerContext {
 export type WorkerHandler = (context: WorkerHandlerContext) => Promise<WorkerHandleResult> | WorkerHandleResult
 
 /** Options accepted by {@link runWorker}. */
-export interface RunWorkerOptions {
+export interface RunWorkerOptions extends WorkerObservers {
   orchestrator: ParallelMcpOrchestrator
   workerId: string
   handler: WorkerHandler
@@ -71,6 +110,13 @@ export interface RunWorkerOptions {
    * with an existing shutdown orchestration.
    */
   installSignalHandlers?: boolean
+  /**
+   * When a `run.cancelled` event fires for the currently-executing task,
+   * abort the handler's `signal` so it can wind down promptly. Default
+   * `true`; set to `false` to keep running handlers oblivious to cancel
+   * events (you'll still see the lease expire eventually).
+   */
+  propagateRunCancellation?: boolean
 }
 
 /** Handle returned by {@link runWorker}. */
@@ -127,6 +173,12 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
     expireLeasesOnPoll = true,
     drainTimeoutMs,
     installSignalHandlers = false,
+    propagateRunCancellation = true,
+    onClaim,
+    onHandlerStart,
+    onHandlerEnd,
+    onHeartbeat,
+    onRunCancelled,
   } = options
 
   const controller = new AbortController()
@@ -146,6 +198,20 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
       process.removeListener('SIGTERM', onSignal)
     }
   }
+
+  const runCancelWatchers = new Map<string, () => void>()
+  const detachRunCancelListener = orchestrator.addEventListener(event => {
+    if (event.eventType !== 'run.cancelled') return
+    const cb = runCancelWatchers.get(event.runId)
+    if (cb) cb()
+  })
+
+  const observers: WorkerObservers = {}
+  if (onClaim) observers.onClaim = onClaim
+  if (onHandlerStart) observers.onHandlerStart = onHandlerStart
+  if (onHandlerEnd) observers.onHandlerEnd = onHandlerEnd
+  if (onHeartbeat) observers.onHeartbeat = onHeartbeat
+  if (onRunCancelled) observers.onRunCancelled = onRunCancelled
 
   const effectiveLeaseMs = leaseMs ?? orchestrator.defaultLeaseMs
   const effectiveHeartbeatMs = heartbeatIntervalMs ?? Math.max(1_000, Math.floor(effectiveLeaseMs / 3))
@@ -183,22 +249,28 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
         }
 
         idleDelay = idleBackoffMs
-        await runOneTask(
+        safeObserver(observers.onClaim, { task: claim.task, lease: claim.lease, workerId }, onError)
+
+        await runOneTask({
           orchestrator,
           workerId,
           handler,
           claim,
-          signal,
-          effectiveHeartbeatMs,
+          workerSignal: signal,
+          heartbeatIntervalMs: effectiveHeartbeatMs,
           drainTimeoutMs,
+          propagateRunCancellation,
+          runCancelWatchers,
+          observers,
           onError,
-        )
+        })
 
         if (!signal.aborted && pollIntervalMs > 0) {
           await sleep(pollIntervalMs, signal)
         }
       }
     } finally {
+      detachRunCancelListener()
       detachSignals?.()
     }
   })()
@@ -210,18 +282,49 @@ export function runWorker(options: RunWorkerOptions): WorkerHandle {
   }
 }
 
+function safeObserver<T>(
+  observer: ((event: T) => void) | undefined,
+  event: T,
+  onError?: (error: unknown, task: TaskRecord | null) => void,
+): void {
+  if (!observer) return
+  try {
+    observer(event)
+  } catch (error) {
+    onError?.(error, null)
+  }
+}
+
 const DRAIN_TIMEOUT = Symbol('drain-timeout')
 
-async function runOneTask(
-  orchestrator: ParallelMcpOrchestrator,
-  workerId: string,
-  handler: WorkerHandler,
-  claim: ClaimTaskResult,
-  signal: AbortSignal,
-  heartbeatIntervalMs: number,
-  drainTimeoutMs: number | undefined,
-  onError?: (error: unknown, task: TaskRecord | null) => void,
-): Promise<void> {
+interface RunOneTaskOptions {
+  orchestrator: ParallelMcpOrchestrator
+  workerId: string
+  handler: WorkerHandler
+  claim: ClaimTaskResult
+  workerSignal: AbortSignal
+  heartbeatIntervalMs: number
+  drainTimeoutMs: number | undefined
+  propagateRunCancellation: boolean
+  runCancelWatchers: Map<string, () => void>
+  observers: WorkerObservers
+  onError: ((error: unknown, task: TaskRecord | null) => void) | undefined
+}
+
+async function runOneTask(opts: RunOneTaskOptions): Promise<void> {
+  const {
+    orchestrator,
+    workerId,
+    handler,
+    claim,
+    workerSignal,
+    heartbeatIntervalMs,
+    drainTimeoutMs,
+    propagateRunCancellation,
+    runCancelWatchers,
+    observers,
+    onError,
+  } = opts
   let task = claim.task
   let lease = claim.lease
 
@@ -236,6 +339,42 @@ async function runOneTask(
     return
   }
 
+  const taskController = new AbortController()
+  const abortForStop = (): void => taskController.abort()
+  if (workerSignal.aborted) taskController.abort()
+  else workerSignal.addEventListener('abort', abortForStop, { once: true })
+
+  let detachRunWatcher: (() => void) | null = null
+  if (propagateRunCancellation) {
+    const runId = task.runId
+    const onRunCancel = (): void => {
+      taskController.abort()
+      safeObserver(observers.onRunCancelled, { runId, task, workerId }, onError)
+    }
+    if (runCancelWatchers.has(runId)) {
+      const existing = runCancelWatchers.get(runId)!
+      const combined = (): void => {
+        existing()
+        onRunCancel()
+      }
+      runCancelWatchers.set(runId, combined)
+      detachRunWatcher = () => {
+        if (runCancelWatchers.get(runId) === combined) {
+          runCancelWatchers.set(runId, existing)
+        }
+      }
+    } else {
+      runCancelWatchers.set(runId, onRunCancel)
+      detachRunWatcher = () => {
+        if (runCancelWatchers.get(runId) === onRunCancel) {
+          runCancelWatchers.delete(runId)
+        }
+      }
+    }
+  }
+
+  const taskSignal = taskController.signal
+
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null
   const requestHeartbeat = (leaseMs?: number): void => {
     try {
@@ -246,30 +385,39 @@ async function runOneTask(
         ...(leaseMs !== undefined ? { leaseMs } : {}),
       })
       lease = next
+      safeObserver(observers.onHeartbeat, { task, lease, workerId }, onError)
     } catch (error) {
       onError?.(error, task)
     }
   }
   heartbeatTimer = setInterval(() => {
-    if (signal.aborted) return
+    if (taskSignal.aborted) return
     requestHeartbeat()
   }, heartbeatIntervalMs)
+
+  safeObserver(observers.onHandlerStart, { task, workerId }, onError)
+  const startedAt = Date.now()
 
   const handlerPromise = Promise.resolve().then(async () => handler({
     task,
     lease,
     workerId,
-    signal,
+    signal: taskSignal,
     heartbeat: requestHeartbeat,
   }))
 
   try {
     const racePromise: Promise<WorkerHandleResult | typeof DRAIN_TIMEOUT> = drainTimeoutMs !== undefined
-      ? Promise.race([handlerPromise, drainWatchdog(signal, drainTimeoutMs)])
+      ? Promise.race([handlerPromise, drainWatchdog(workerSignal, drainTimeoutMs)])
       : handlerPromise
 
     const result = await racePromise
     if (result === DRAIN_TIMEOUT) {
+      safeObserver(
+        observers.onHandlerEnd,
+        { task, workerId, durationMs: Date.now() - startedAt, outcome: { status: 'drain_timeout' as const } },
+        onError,
+      )
       try {
         orchestrator.releaseTask({
           taskId: task.id,
@@ -283,8 +431,18 @@ async function runOneTask(
       handlerPromise.catch(error => onError?.(error, task))
       return
     }
+    safeObserver(
+      observers.onHandlerEnd,
+      { task, workerId, durationMs: Date.now() - startedAt, outcome: result },
+      onError,
+    )
     applyResult(orchestrator, workerId, task, lease, result)
   } catch (error) {
+    safeObserver(
+      observers.onHandlerEnd,
+      { task, workerId, durationMs: Date.now() - startedAt, outcome: { status: 'threw' as const, error } },
+      onError,
+    )
     onError?.(error, task)
     try {
       orchestrator.failTask({
@@ -301,6 +459,8 @@ async function runOneTask(
       clearInterval(heartbeatTimer)
       heartbeatTimer = null
     }
+    workerSignal.removeEventListener('abort', abortForStop)
+    detachRunWatcher?.()
   }
 }
 

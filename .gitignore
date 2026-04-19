@@ -4,3 +4,4 @@ coverage
 .DS_Store
 *.log
 package.json.prepack-backup
+docs/api

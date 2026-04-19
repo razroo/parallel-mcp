@@ -1,4 +1,5 @@
 import { SqliteParallelMcpStore } from './sqlite-store.js'
+import type { ParallelMcpStore } from './store.js'
 import type {
   AppendContextSnapshotOptions,
   CancelRunOptions,
@@ -39,14 +40,16 @@ import type {
  *   walk-through of building a worker on top of this API.
  */
 export class ParallelMcpOrchestrator {
-  readonly store: SqliteParallelMcpStore
+  readonly store: ParallelMcpStore
   readonly defaultLeaseMs: number
   private removeEventListener: (() => void) | null = null
 
   /**
-   * @param store - Underlying durable store. Defaults to a fresh in-memory
-   *                {@link SqliteParallelMcpStore}. In production you almost
-   *                always want to pass a store pointed at a durable file.
+   * @param store - Underlying durable store. Any implementation of
+   *                {@link ParallelMcpStore} works — the shipped default is a
+   *                fresh in-memory {@link SqliteParallelMcpStore}. Swap in
+   *                an alternative adapter (e.g. `@razroo/parallel-mcp-postgres`)
+   *                by passing it here.
    * @param options - Orchestrator-level defaults. `defaultLeaseMs` (default
    *                  30_000) is the lease duration used when `claimNextTask`
    *                  / `heartbeatLease` is called without an explicit
@@ -54,7 +57,7 @@ export class ParallelMcpOrchestrator {
    *                  that fires for every durable event; listener exceptions
    *                  are swallowed so observability cannot break writes.
    */
-  constructor(store = new SqliteParallelMcpStore(), options: ParallelMcpOptions = {}) {
+  constructor(store: ParallelMcpStore = new SqliteParallelMcpStore(), options: ParallelMcpOptions = {}) {
     this.store = store
     this.defaultLeaseMs = options.defaultLeaseMs ?? 30_000
     if (options.onEvent) {
@@ -72,6 +75,19 @@ export class ParallelMcpOrchestrator {
       this.removeEventListener = null
     }
     this.store.close()
+  }
+
+  /**
+   * Register a synchronous observer for every durable event written by this
+   * orchestrator. Returns a detach function. Multiple listeners can be
+   * registered at once; they fire in registration order.
+   *
+   * Listener exceptions are swallowed so observability cannot break writes.
+   * Use this to build workers that react to `run.cancelled`, external
+   * dashboards, metrics exporters, etc.
+   */
+  addEventListener(listener: (event: EventRecord) => void): () => void {
+    return this.store.addEventListener(listener)
   }
 
   /**

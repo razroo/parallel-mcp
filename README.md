@@ -315,6 +315,7 @@ See also:
 - [`docs/failure-modes.md`](./docs/failure-modes.md) — typed errors and how to handle each failure
 - [`docs/authoring-adapters.md`](./docs/authoring-adapters.md) — writing an adapter with `runWorker`
 - [`testkit/`](./testkit) — `@razroo/parallel-mcp-testkit`, a drop-in Vitest conformance suite for alternative adapter implementations
+- [`adapters/postgres/`](./adapters/postgres) — `@razroo/parallel-mcp-postgres`, **alpha** reference Postgres adapter (ships the canonical schema today; full async store is in progress)
 - [`bench/`](./bench/) — local throughput bench for the claim path
 
 ## MCP server adapter

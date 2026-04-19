@@ -1,15 +1,16 @@
 {
-  "name": "@razroo/parallel-mcp-testkit",
-  "version": "0.3.0",
-  "description": "Conformance test suite for alternative @razroo/parallel-mcp orchestrator/store implementations",
+  "name": "@razroo/parallel-mcp-postgres",
+  "version": "0.1.0-alpha.0",
+  "description": "Postgres adapter for @razroo/parallel-mcp — work in progress reference implementation",
   "license": "MIT",
   "type": "module",
+  "private": true,
   "repository": {
     "type": "git",
     "url": "git+https://github.com/razroo/parallel-mcp.git",
-    "directory": "testkit"
+    "directory": "adapters/postgres"
   },
-  "homepage": "https://github.com/razroo/parallel-mcp/tree/main/testkit#readme",
+  "homepage": "https://github.com/razroo/parallel-mcp/tree/main/adapters/postgres#readme",
   "bugs": {
     "url": "https://github.com/razroo/parallel-mcp/issues"
   },
@@ -19,6 +20,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts",
+      "import": "./dist/schema.js"
     }
   },
   "publishConfig": {
@@ -35,28 +40,26 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "prepack": "node ./scripts/prepack.mjs",
-    "postpack": "node ./scripts/postpack.mjs",
-    "prepublishOnly": "npm run check && npm test && npm run build",
-    "pack:check": "npm run prepublishOnly && npm pack --dry-run"
+    "test:watch": "vitest"
   },
   "keywords": [
     "mcp",
     "parallel",
     "orchestration",
-    "testkit",
-    "conformance"
+    "postgres",
+    "adapter"
   ],
   "peerDependencies": {
-    "@razroo/parallel-mcp": ">=0.3.0 <1.0.0",
-    "vitest": ">=1.0.0 <5.0.0"
+    "@razroo/parallel-mcp": ">=0.3.0 <1.0.0"
   },
   "dependencies": {
-    "@razroo/parallel-mcp": "file:.."
+    "@razroo/parallel-mcp": "file:../..",
+    "pg": "^8.13.1"
   },
   "devDependencies": {
+    "@razroo/parallel-mcp-testkit": "file:../../testkit",
     "@types/node": "^25.6.0",
+    "@types/pg": "^8.11.10",
     "typescript": "^6.0.3",
     "vitest": "^4.1.4"
   }

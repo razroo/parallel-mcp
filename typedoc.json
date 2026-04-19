@@ -1,0 +1,21 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["src/index.ts"],
+  "out": "docs/api",
+  "tsconfig": "tsconfig.json",
+  "name": "@razroo/parallel-mcp",
+  "readme": "README.md",
+  "includeVersion": true,
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "excludeProtected": false,
+  "excludeExternals": true,
+  "hideGenerator": true,
+  "navigationLinks": {
+    "GitHub": "https://github.com/razroo/parallel-mcp",
+    "Changelog": "https://github.com/razroo/parallel-mcp/blob/main/CHANGELOG.md"
+  },
+  "categorizeByGroup": true,
+  "sort": ["source-order"],
+  "gitRevision": "main"
+}
