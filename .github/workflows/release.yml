@@ -66,7 +66,7 @@ jobs:
         id: pack_core
         shell: bash
         run: |
-          PACKAGE_TGZ="$(npm pack)"
+          PACKAGE_TGZ="$(npm pack --silent | tail -n 1)"
           echo "package_tgz=${PACKAGE_TGZ}" >> "${GITHUB_OUTPUT}"
 
       - name: Pack server
@@ -74,7 +74,7 @@ jobs:
         shell: bash
         working-directory: server
         run: |
-          PACKAGE_TGZ="$(npm pack)"
+          PACKAGE_TGZ="$(npm pack --silent | tail -n 1)"
           echo "package_tgz=server/${PACKAGE_TGZ}" >> "${GITHUB_OUTPUT}"
 
       - name: Pack testkit
@@ -82,7 +82,7 @@ jobs:
         shell: bash
         working-directory: testkit
         run: |
-          PACKAGE_TGZ="$(npm pack)"
+          PACKAGE_TGZ="$(npm pack --silent | tail -n 1)"
           echo "package_tgz=testkit/${PACKAGE_TGZ}" >> "${GITHUB_OUTPUT}"
 
       - name: Publish core to npm
