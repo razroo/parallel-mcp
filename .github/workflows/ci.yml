@@ -37,6 +37,9 @@ jobs:
       - name: Typecheck (all workspaces)
         run: npm run check
 
+      - name: Build testkit (required before adapter tests that import it)
+        run: npm run build:testkit
+
       - name: Test core
         run: npm test
 
@@ -54,9 +57,6 @@ jobs:
 
       - name: Build server
         run: npm run build:server
-
-      - name: Build testkit
-        run: npm run build:testkit
 
       - name: Build postgres adapter
         run: npm run build:postgres
@@ -139,6 +139,9 @@ jobs:
 
       - name: Typecheck
         run: npm run check
+
+      - name: Build testkit (required by memory adapter test imports)
+        run: npm run build:testkit
 
       - name: Test core
         run: npm test
