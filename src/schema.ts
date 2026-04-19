@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   retry_delay_ms INTEGER,
   retry_backoff TEXT,
   retry_max_delay_ms INTEGER,
+  timeout_ms INTEGER,
   not_before TEXT,
   input TEXT,
   output TEXT,
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   lease_id TEXT,
   leased_by TEXT,
   lease_expires_at TEXT,
+  dead INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   started_at TEXT,
@@ -45,6 +47,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS tasks_run_key_unique
 
 CREATE INDEX IF NOT EXISTS tasks_run_status_idx ON tasks(run_id, status);
 CREATE INDEX IF NOT EXISTS tasks_claim_idx ON tasks(status, priority DESC, created_at ASC);
+CREATE INDEX IF NOT EXISTS tasks_dead_idx ON tasks(dead) WHERE dead = 1;
 
 CREATE TABLE IF NOT EXISTS task_dependencies (
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,

@@ -49,6 +49,9 @@ jobs:
       - name: Test postgres adapter (unit / schema tests)
         run: npm run test:postgres
 
+      - name: Test memory adapter (async conformance suite)
+        run: npm run test:memory
+
       - name: Build server
         run: npm run build:server
 
@@ -57,6 +60,53 @@ jobs:
 
       - name: Build postgres adapter
         run: npm run build:postgres
+
+      - name: Build memory adapter
+        run: npm run build:memory
+
+  postgres-live:
+    name: Postgres live conformance
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pmcp
+          POSTGRES_PASSWORD: pmcp
+          POSTGRES_DB: pmcp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U pmcp"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      DATABASE_URL: postgres://pmcp:pmcp@localhost:5432/pmcp_test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build core (required before adapter typecheck)
+        run: npm run build
+
+      - name: Build testkit (required by postgres test imports)
+        run: npm run build:testkit
+
+      - name: Run live Postgres conformance suite
+        run: npm run test:postgres
 
   compat-sqlite:
     name: better-sqlite3 compat floor (v${{ matrix.better-sqlite3 }})
@@ -98,3 +148,6 @@ jobs:
 
       - name: Test testkit
         run: npm run test:testkit
+
+      - name: Test memory adapter
+        run: npm run test:memory

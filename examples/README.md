@@ -58,3 +58,30 @@ npm run example:multi-worker
 Prints a per-worker completion tally at the end so you can see how work
 distributes across workers. Across runs the numbers will vary — that's
 the point.
+
+## async-dlq-triage
+
+End-to-end demo of the 0.4.0 async surface — `AsyncParallelMcpOrchestrator`
++ `MemoryParallelMcpStore` + a hand-rolled async worker loop + the
+dead-letter queue.
+
+1. Builds an in-memory async store (no Postgres required). Swap in
+   `PostgresParallelMcpStore` for the durable path.
+2. Enqueues three tasks: two happy tasks plus a poison task that
+   simulates a worker crash (claim → stop responding → lease expires).
+3. Runs two async worker coroutines that opportunistically call
+   `expireLeases()` each poll. After the poison task exhausts
+   `maxAttempts` via repeated lease expiries, it is parked in the DLQ.
+4. Pulls `listDeadTasks`, prints the triage summary, and revives the
+   poison task with `requeueDeadTask({ reason: 'operator replay ...' })`
+   — which emits `task.requeued_from_dlq`. The replayed task dies again
+   (still poison) to show the DLQ cycle is re-entrant.
+
+```bash
+npm run example:async-dlq-triage
+```
+
+Note: `runWorker` is currently sync-only. Async callers drive
+`claimNextTask` / `markTaskRunning` / `completeTask` / `failTask`
+directly until a first-class `runAsyncWorker` ships. This example is
+the reference for that pattern.

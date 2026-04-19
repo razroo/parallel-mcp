@@ -30,6 +30,8 @@ export type EventType =
   | 'task.failed'
   | 'task.released'
   | 'task.lease_expired'
+  | 'task.dead_lettered'
+  | 'task.requeued_from_dlq'
   | 'context.snapshot.created'
 
 /** Payload shape for `run.created`. */
@@ -115,6 +117,22 @@ export interface TaskLeaseExpiredPayload {
   notBefore: string | null
 }
 
+/** Payload shape for `task.dead_lettered`. Emitted when a task exhausts its retry budget. */
+export interface TaskDeadLetteredPayload {
+  workerId: string | null
+  attemptCount: number
+  maxAttempts: number | null
+  lastError: string
+}
+
+/** Payload shape for `task.requeued_from_dlq`. */
+export interface TaskRequeuedFromDlqPayload {
+  resetAttempts: boolean
+  notBefore: string | null
+  reason: string | null
+  previousAttemptCount: number
+}
+
 /** Payload shape for `context.snapshot.created`. */
 export interface ContextSnapshotCreatedPayload {
   snapshotId: string
@@ -142,6 +160,8 @@ export interface EventPayloadByType {
   'task.failed': TaskFailedPayload
   'task.released': TaskReleasedPayload
   'task.lease_expired': TaskLeaseExpiredPayload
+  'task.dead_lettered': TaskDeadLetteredPayload
+  'task.requeued_from_dlq': TaskRequeuedFromDlqPayload
   'context.snapshot.created': ContextSnapshotCreatedPayload
 }
 

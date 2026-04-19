@@ -68,6 +68,14 @@ export interface TaskRecord {
   retryDelayMs: number | null
   retryBackoff: RetryBackoff | null
   retryMaxDelayMs: number | null
+  /**
+   * Hard wall-clock budget for a single attempt, in milliseconds. The
+   * worker loop ({@link import('./worker.js').runWorker}) enforces this
+   * against the handler's `AbortSignal`; the lease's TTL is the *crash*
+   * budget and is set separately via `claimNextTask({ leaseMs })`.
+   * `null` means no per-attempt deadline.
+   */
+  timeoutMs: number | null
   notBefore: string | null
   input: JsonValue | null
   output: JsonValue | null
@@ -78,6 +86,12 @@ export interface TaskRecord {
   leasedBy: string | null
   leaseExpiresAt: string | null
   dependsOnTaskIds: string[]
+  /**
+   * When `true`, the task has exhausted its retry budget and is parked in
+   * the dead-letter queue. Use `orchestrator.listDeadTasks()` to triage
+   * and `orchestrator.requeueDeadTask()` to revive.
+   */
+  dead: boolean
   createdAt: string
   updatedAt: string
   startedAt: string | null
@@ -160,6 +174,14 @@ export interface EnqueueTaskOptions {
   priority?: number
   maxAttempts?: number
   retry?: RetryPolicy
+  /**
+   * Hard per-attempt wall-clock budget, in milliseconds. When set, the
+   * worker ({@link import('./worker.js').runWorker}) aborts the handler's
+   * `AbortSignal` after `timeoutMs` elapses and marks the attempt as a
+   * timeout-fail (which still respects `maxAttempts` + retry backoff).
+   * Independent of `leaseMs`, which controls crash-detection only.
+   */
+  timeoutMs?: number
   input?: JsonValue
   metadata?: JsonValue
   contextSnapshotId?: string
@@ -298,6 +320,26 @@ export interface ListEventsResult {
   events: EventRecord[]
   /** Pass back as `afterId` to fetch the next page, or `null` when caught up. */
   nextCursor: number | null
+}
+
+/** Options for `orchestrator.listDeadTasks`. */
+export interface ListDeadTasksOptions {
+  runId?: string
+  kinds?: string[]
+  limit?: number
+  offset?: number
+}
+
+/** Options for `orchestrator.requeueDeadTask`. */
+export interface RequeueDeadTaskOptions {
+  taskId: string
+  /** Reset `attemptCount` to `0` before requeueing. Default `true`. */
+  resetAttempts?: boolean
+  /** Optional override: schedule the requeued task no earlier than this. */
+  notBefore?: Date | string | number
+  /** Free-form operator note appended to the `task.requeued_from_dlq` event. */
+  reason?: string
+  now?: Date | string | number
 }
 
 /** Options for `orchestrator.pruneRuns`. */

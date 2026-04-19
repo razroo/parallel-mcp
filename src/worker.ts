@@ -54,7 +54,11 @@ export interface WorkerObservers {
     task: TaskRecord
     workerId: string
     durationMs: number
-    outcome: WorkerHandleResult | { status: 'threw'; error: unknown } | { status: 'drain_timeout' }
+    outcome:
+      | WorkerHandleResult
+      | { status: 'threw'; error: unknown }
+      | { status: 'drain_timeout' }
+      | { status: 'task_timeout'; timeoutMs: number }
   }) => void
   /** Fires after each successful heartbeat bump of a task's lease. */
   onHeartbeat?: (event: { task: TaskRecord; lease: TaskLeaseRecord; workerId: string }) => void
@@ -296,6 +300,7 @@ function safeObserver<T>(
 }
 
 const DRAIN_TIMEOUT = Symbol('drain-timeout')
+const TASK_TIMEOUT = Symbol('task-timeout')
 
 interface RunOneTaskOptions {
   orchestrator: ParallelMcpOrchestrator
@@ -406,10 +411,21 @@ async function runOneTask(opts: RunOneTaskOptions): Promise<void> {
     heartbeat: requestHeartbeat,
   }))
 
+  let taskTimeoutTimer: ReturnType<typeof setTimeout> | null = null
+  const taskTimeoutPromise: Promise<typeof TASK_TIMEOUT> | null = task.timeoutMs && task.timeoutMs > 0
+    ? new Promise<typeof TASK_TIMEOUT>(resolve => {
+        taskTimeoutTimer = setTimeout(() => {
+          taskController.abort()
+          resolve(TASK_TIMEOUT)
+        }, task.timeoutMs!)
+      })
+    : null
+
   try {
-    const racePromise: Promise<WorkerHandleResult | typeof DRAIN_TIMEOUT> = drainTimeoutMs !== undefined
-      ? Promise.race([handlerPromise, drainWatchdog(workerSignal, drainTimeoutMs)])
-      : handlerPromise
+    const raceEntries: Array<Promise<WorkerHandleResult | typeof DRAIN_TIMEOUT | typeof TASK_TIMEOUT>> = [handlerPromise]
+    if (drainTimeoutMs !== undefined) raceEntries.push(drainWatchdog(workerSignal, drainTimeoutMs))
+    if (taskTimeoutPromise) raceEntries.push(taskTimeoutPromise)
+    const racePromise = raceEntries.length === 1 ? raceEntries[0]! : Promise.race(raceEntries)
 
     const result = await racePromise
     if (result === DRAIN_TIMEOUT) {
@@ -424,6 +440,31 @@ async function runOneTask(opts: RunOneTaskOptions): Promise<void> {
           leaseId: lease.id,
           workerId,
           reason: 'worker_drain_timeout',
+        })
+      } catch (error) {
+        onError?.(error, task)
+      }
+      handlerPromise.catch(error => onError?.(error, task))
+      return
+    }
+    if (result === TASK_TIMEOUT) {
+      const timeoutMs = task.timeoutMs!
+      safeObserver(
+        observers.onHandlerEnd,
+        {
+          task,
+          workerId,
+          durationMs: Date.now() - startedAt,
+          outcome: { status: 'task_timeout' as const, timeoutMs },
+        },
+        onError,
+      )
+      try {
+        orchestrator.failTask({
+          taskId: task.id,
+          leaseId: lease.id,
+          workerId,
+          error: `task_timeout_exceeded:${timeoutMs}ms`,
         })
       } catch (error) {
         onError?.(error, task)
@@ -458,6 +499,10 @@ async function runOneTask(opts: RunOneTaskOptions): Promise<void> {
     if (heartbeatTimer !== null) {
       clearInterval(heartbeatTimer)
       heartbeatTimer = null
+    }
+    if (taskTimeoutTimer !== null) {
+      clearTimeout(taskTimeoutTimer)
+      taskTimeoutTimer = null
     }
     workerSignal.removeEventListener('abort', abortForStop)
     detachRunWatcher?.()

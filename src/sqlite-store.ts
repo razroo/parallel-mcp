@@ -25,6 +25,7 @@ import type {
   ResumeTaskOptions,
   CreateRunOptions,
   EnqueueTaskOptions,
+  ListDeadTasksOptions,
   ListEventsResult,
   ListEventsSinceOptions,
   ListPendingTasksOptions,
@@ -32,6 +33,7 @@ import type {
   PruneRunsOptions,
   PruneRunsResult,
   ReleaseTaskOptions,
+  RequeueDeadTaskOptions,
   RunRecord,
   TaskAttemptRecord,
   TaskLeaseRecord,
@@ -65,6 +67,7 @@ interface TaskRow {
   retry_delay_ms: number | null
   retry_backoff: 'fixed' | 'exponential' | null
   retry_max_delay_ms: number | null
+  timeout_ms: number | null
   not_before: string | null
   input: string | null
   output: string | null
@@ -74,6 +77,7 @@ interface TaskRow {
   lease_id: string | null
   leased_by: string | null
   lease_expires_at: string | null
+  dead: number
   created_at: string
   updated_at: string
   started_at: string | null
@@ -380,15 +384,15 @@ export class SqliteParallelMcpStore {
       this.db.prepare(`
         INSERT INTO tasks (
           id, run_id, task_key, kind, status, priority, max_attempts, attempt_count,
-          retry_delay_ms, retry_backoff, retry_max_delay_ms, not_before,
+          retry_delay_ms, retry_backoff, retry_max_delay_ms, timeout_ms, not_before,
           input, output, metadata, error, context_snapshot_id, lease_id, leased_by, lease_expires_at,
-          created_at, updated_at, started_at, completed_at
+          dead, created_at, updated_at, started_at, completed_at
         )
         VALUES (
           @id, @runId, @taskKey, @kind, 'queued', @priority, @maxAttempts, 0,
-          @retryDelayMs, @retryBackoff, @retryMaxDelayMs, NULL,
+          @retryDelayMs, @retryBackoff, @retryMaxDelayMs, @timeoutMs, NULL,
           @input, NULL, @metadata, NULL, @contextSnapshotId, NULL, NULL, NULL,
-          @createdAt, @updatedAt, NULL, NULL
+          0, @createdAt, @updatedAt, NULL, NULL
         )
       `).run({
         id: taskId,
@@ -400,6 +404,7 @@ export class SqliteParallelMcpStore {
         retryDelayMs: options.retry?.delayMs ?? null,
         retryBackoff: options.retry?.backoff ?? null,
         retryMaxDelayMs: options.retry?.maxDelayMs ?? null,
+        timeoutMs: options.timeoutMs ?? null,
         input: jsonText(options.input),
         metadata: jsonText(options.metadata),
         contextSnapshotId: options.contextSnapshotId ?? run.currentContextSnapshotId,
@@ -1006,6 +1011,7 @@ export class SqliteParallelMcpStore {
                 leased_by = NULL,
                 lease_expires_at = NULL,
                 not_before = NULL,
+                dead = 1,
                 updated_at = ?,
                 completed_at = ?
             WHERE id = ?
@@ -1016,6 +1022,13 @@ export class SqliteParallelMcpStore {
             error: 'max_attempts_exceeded',
             attemptCount: task.attemptCount,
             maxAttempts: task.maxAttempts,
+          }, now)
+
+          this.insertEvent(task.runId, task.id, attempt.id, 'task.dead_lettered', {
+            workerId: task.leasedBy,
+            attemptCount: task.attemptCount,
+            maxAttempts: task.maxAttempts,
+            lastError: 'max_attempts_exceeded',
           }, now)
         } else {
           const notBefore = computeNotBefore(task, now)
@@ -1250,6 +1263,81 @@ export class SqliteParallelMcpStore {
   }
 
   /**
+   * List tasks currently parked in the dead-letter queue (`dead = 1`).
+   * Ordered by most-recently-dead first.
+   */
+  listDeadTasks(options: ListDeadTasksOptions = {}): TaskRecord[] {
+    const clauses: string[] = ['dead = 1']
+    const params: unknown[] = []
+
+    if (options.runId) {
+      clauses.push('run_id = ?')
+      params.push(options.runId)
+    }
+    if (options.kinds && options.kinds.length > 0) {
+      clauses.push(`kind IN (${options.kinds.map(() => '?').join(', ')})`)
+      params.push(...options.kinds)
+    }
+
+    const limit = options.limit ?? 100
+    const offset = options.offset ?? 0
+    const rows = this.db.prepare(`
+      SELECT *
+      FROM tasks
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY updated_at DESC, id ASC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset) as TaskRow[]
+
+    return rows.map(row => this.hydrateTaskRecord(row))
+  }
+
+  /**
+   * Requeue a dead-letter task back onto the runnable queue. By default
+   * clears `attemptCount` and `error` so the task gets a fresh retry
+   * budget. Emits `task.requeued_from_dlq` on the event log.
+   */
+  requeueDeadTask(options: RequeueDeadTaskOptions): TaskRecord {
+    const now = toIsoTimestamp(options.now)
+    const resetAttempts = options.resetAttempts !== false
+    const notBefore = options.notBefore === undefined ? null : toIsoTimestamp(options.notBefore)
+
+    this.db.transaction(() => {
+      const task = this.requireTask(options.taskId)
+      if (!task.dead) {
+        throw new InvalidTransitionError('task', task.status, 'queued')
+      }
+
+      this.db.prepare(`
+        UPDATE tasks
+        SET status = 'queued',
+            dead = 0,
+            error = NULL,
+            lease_id = NULL,
+            leased_by = NULL,
+            lease_expires_at = NULL,
+            started_at = NULL,
+            completed_at = NULL,
+            not_before = ?,
+            attempt_count = CASE WHEN ? = 1 THEN 0 ELSE attempt_count END,
+            updated_at = ?
+        WHERE id = ?
+      `).run(notBefore, resetAttempts ? 1 : 0, now, options.taskId)
+
+      this.insertEvent(task.runId, task.id, null, 'task.requeued_from_dlq', {
+        resetAttempts,
+        notBefore,
+        reason: options.reason ?? null,
+        previousAttemptCount: task.attemptCount,
+      }, now)
+
+      this.recomputeRunStatus(task.runId, now)
+    })()
+
+    return this.requireTask(options.taskId)
+  }
+
+  /**
    * Run `fn` in a SQLite `IMMEDIATE` transaction. Every durable write made
    * inside commits or rolls back atomically; throwing from `fn` rolls back.
    * Use for composite operations that must be all-or-nothing.
@@ -1326,6 +1414,7 @@ export class SqliteParallelMcpStore {
       retryDelayMs: row.retry_delay_ms,
       retryBackoff: row.retry_backoff,
       retryMaxDelayMs: row.retry_max_delay_ms,
+      timeoutMs: row.timeout_ms,
       notBefore: row.not_before,
       input: parseJson(row.input),
       output: parseJson(row.output),
@@ -1336,6 +1425,7 @@ export class SqliteParallelMcpStore {
       leasedBy: row.leased_by,
       leaseExpiresAt: row.lease_expires_at,
       dependsOnTaskIds: dependencyRows.map(dep => dep.depends_on_task_id),
+      dead: row.dead === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       startedAt: row.started_at,

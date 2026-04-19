@@ -1,26 +1,18 @@
 # `@razroo/parallel-mcp-postgres`
 
-**Status: alpha / work in progress.** This workspace is a **reference**
-implementation of a Postgres-backed `ParallelMcpStore`. It exists so that
-alternative adapter authors can see the expected shape, schema, and
-conformance-testing setup. It does **not** yet implement every orchestrator
-operation — see the `NotImplementedError` throw sites in `src/store.ts`.
+**Status: beta.** This workspace ships a Postgres-backed
+`AsyncParallelMcpStore` that implements the full orchestrator contract
+pinned by `@razroo/parallel-mcp-testkit`'s async conformance suite. It is
+a straight port of the reference `SqliteParallelMcpStore`, with:
 
-If you need a production-ready Postgres adapter today, use
-`@razroo/parallel-mcp`'s bundled `SqliteParallelMcpStore` against a durable
-file while this adapter matures, or help us finish it.
+- `JSONB` columns where SQLite used `TEXT`-encoded JSON
+- `BIGSERIAL` on `events.id` so the event cursor stays monotonic
+- `TIMESTAMPTZ` for every timestamp
+- `SELECT … FOR UPDATE SKIP LOCKED` for multi-worker-safe claims
 
 ## Schema
 
 The canonical schema is a single SQL string exported as `POSTGRES_SCHEMA`.
-It is a straight port of `src/schema.ts` from the core package, with:
-
-- `JSONB` columns where SQLite used `TEXT`-encoded JSON.
-- `BIGSERIAL` for `events.id` to preserve monotonic ordering.
-- `TIMESTAMPTZ` for every timestamp.
-- A handful of partial indexes (`WHERE status = 'active'`) that Postgres
-  handles natively but SQLite fakes with composite indexes.
-
 Apply it once against a fresh database:
 
 ```ts
@@ -32,59 +24,57 @@ await pool.query(POSTGRES_SCHEMA)
 ```
 
 In production you'll almost always wrap this in a real migration tool
-(`drizzle-kit`, `node-pg-migrate`, etc.) — we publish it as a single
+(`drizzle-kit`, `node-pg-migrate`, etc.). We publish it as a single
 string so you can copy-paste it into a `0001_init.sql` file if you want.
 
-## Usage (will work once the adapter is complete)
+## Usage
 
 ```ts
 import { Pool } from 'pg'
-import { ParallelMcpOrchestrator } from '@razroo/parallel-mcp'
+import { AsyncParallelMcpOrchestrator } from '@razroo/parallel-mcp'
 import { PostgresParallelMcpStore } from '@razroo/parallel-mcp-postgres'
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL })
-const store = new PostgresParallelMcpStore({ pool })
-await store.migrate() // or own migrations out-of-band
+const store = new PostgresParallelMcpStore({ pool, autoMigrate: true })
 
-const orchestrator = new ParallelMcpOrchestrator(store, { defaultLeaseMs: 30_000 })
+const orchestrator = new AsyncParallelMcpOrchestrator(store, {
+  defaultLeaseMs: 30_000,
+})
+
+const run = await orchestrator.createRun({ namespace: 'demo' })
+await orchestrator.enqueueTask({ runId: run.id, kind: 'greet' })
 ```
 
-## Why async vs sync?
+The store implements the async interface, so you drive it through
+`AsyncParallelMcpOrchestrator` — **not** the synchronous
+`ParallelMcpOrchestrator`.
 
-`ParallelMcpStore` is currently a **synchronous** interface, because the
-reference SQLite adapter talks to `better-sqlite3` in-process. A
-production Postgres adapter needs to be async — `pg` is network I/O.
+## Running the live conformance suite
 
-The path forward is to introduce an `AsyncParallelMcpStore` sibling
-interface in the core package and let adapters implement whichever shape
-makes sense for their backend. Until that lands, every operation in this
-adapter throws `NotImplementedError` rather than pretending to be sync.
-
-Tracking issue: <https://github.com/razroo/parallel-mcp/issues> (file
-one if you want to lead this).
-
-## Running against a live Postgres
-
-Tests use a real Postgres. Set `PG_TEST_URL` in your environment and
-run:
+Tests run against a real Postgres when `DATABASE_URL` is set and are
+skipped otherwise.
 
 ```bash
-PG_TEST_URL=postgres://localhost:5432/parallel_mcp_test npm test
+docker run --rm -d --name pmcp-pg -p 5432:5432 \
+  -e POSTGRES_PASSWORD=postgres postgres:16
+
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres \
+  npm run test --workspace @razroo/parallel-mcp-postgres
 ```
 
-Without `PG_TEST_URL` the live-database tests are skipped; the rest of
-the suite (schema string, listener wiring, unimplemented-error shape)
-still runs.
+Each test spawns its own schema (`pmcp_test_<rand>`), runs the full
+`runAsyncConformanceSuite`, and drops the schema on cleanup so the runs
+are independent.
+
+## Pool ownership
+
+`PostgresParallelMcpStore` does **not** call `pool.end()` in `close()` —
+the pool belongs to the caller. This matches the idiom for long-running
+servers that share a pool across many stores.
 
 ## Contributing
 
-Please read the root [`CONTRIBUTING.md`](../../CONTRIBUTING.md). The fast
-path to getting this adapter to parity is:
-
-1. Implement one method end-to-end (e.g. `createRun`).
-2. Add a Vitest test under `tests/` that exercises it against `PG_TEST_URL`.
-3. Wire it into `runConformanceSuite` from `@razroo/parallel-mcp-testkit`.
-4. Repeat.
-
-The typed errors you must throw are documented in
+Please read the root [`CONTRIBUTING.md`](../../CONTRIBUTING.md). Typed
+errors and the full set of operations you need to honor when writing an
+adapter from scratch are documented in
 [`../../docs/authoring-adapters.md`](../../docs/authoring-adapters.md).

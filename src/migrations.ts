@@ -65,6 +65,21 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    id: 4,
+    name: 'tasks_timeout_and_dead_letter',
+    up: db => {
+      const columns = db.prepare(`PRAGMA table_info(tasks)`).all() as Array<{ name: string }>
+      const existing = new Set(columns.map(column => column.name))
+      if (!existing.has('timeout_ms')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN timeout_ms INTEGER`)
+      }
+      if (!existing.has('dead')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN dead INTEGER NOT NULL DEFAULT 0`)
+      }
+      db.exec(`CREATE INDEX IF NOT EXISTS tasks_dead_idx ON tasks(dead) WHERE dead = 1`)
+    },
+  },
 ]
 
 export function runMigrations(db: Database.Database): void {

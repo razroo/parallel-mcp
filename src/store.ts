@@ -11,6 +11,7 @@ import type {
   ExpireLeaseResult,
   FailTaskOptions,
   HeartbeatLeaseOptions,
+  ListDeadTasksOptions,
   ListEventsResult,
   ListEventsSinceOptions,
   ListPendingTasksOptions,
@@ -19,6 +20,7 @@ import type {
   PruneRunsOptions,
   PruneRunsResult,
   ReleaseTaskOptions,
+  RequeueDeadTaskOptions,
   ResumeTaskOptions,
   RunRecord,
   TaskLeaseRecord,
@@ -88,4 +90,16 @@ export interface ParallelMcpStore {
   listPendingTasks(options?: ListPendingTasksOptions): TaskRecord[]
   listEventsSince(options?: ListEventsSinceOptions): ListEventsResult
   pruneRuns(options: PruneRunsOptions): PruneRunsResult
+  /**
+   * List tasks parked in the dead-letter queue (i.e. `dead = true`). A task
+   * enters the DLQ when `maxAttempts` is exhausted; its last `error` is
+   * preserved on the {@link TaskRecord} for operator triage.
+   */
+  listDeadTasks(options?: ListDeadTasksOptions): TaskRecord[]
+  /**
+   * Requeue a dead-letter task. By default resets `attemptCount` to `0`,
+   * clears `error`, flips `dead` back to `false`, and moves the task to
+   * `queued`.
+   */
+  requeueDeadTask(options: RequeueDeadTaskOptions): TaskRecord
 }

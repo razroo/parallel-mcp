@@ -13,6 +13,7 @@ import type {
   ExpireLeaseResult,
   FailTaskOptions,
   HeartbeatLeaseOptions,
+  ListDeadTasksOptions,
   ListEventsResult,
   ListEventsSinceOptions,
   ListPendingTasksOptions,
@@ -21,6 +22,7 @@ import type {
   PruneRunsOptions,
   PruneRunsResult,
   ReleaseTaskOptions,
+  RequeueDeadTaskOptions,
   ResumeTaskOptions,
   RunRecord,
   TaskRecord,
@@ -271,6 +273,27 @@ export class ParallelMcpOrchestrator {
    */
   pruneRuns(options: PruneRunsOptions): PruneRunsResult {
     return this.store.pruneRuns(options)
+  }
+
+  /**
+   * List tasks currently parked in the dead-letter queue. A task enters
+   * the DLQ when its lease expires after `maxAttempts` has been reached.
+   * Inspect the returned records (they keep their last `error`) and call
+   * {@link requeueDeadTask} to revive.
+   */
+  listDeadTasks(options: ListDeadTasksOptions = {}): TaskRecord[] {
+    return this.store.listDeadTasks(options)
+  }
+
+  /**
+   * Requeue a dead-letter task. By default clears `attemptCount` and
+   * `error` so the task gets a fresh retry budget. Set
+   * `resetAttempts: false` to keep the attempt counter (rare; useful
+   * when you've fixed a deterministic bug and want the *same* retry
+   * budget without resetting).
+   */
+  requeueDeadTask(options: RequeueDeadTaskOptions): TaskRecord {
+    return this.store.requeueDeadTask(options)
   }
 
   /**

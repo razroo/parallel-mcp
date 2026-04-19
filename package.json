@@ -1,6 +1,6 @@
 {
   "name": "@razroo/parallel-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Durable orchestration core for parallel MCP workloads",
   "license": "MIT",
   "type": "module",
@@ -34,27 +34,32 @@
   "workspaces": [
     "server",
     "testkit",
-    "adapters/postgres"
+    "adapters/postgres",
+    "adapters/memory"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:server": "npm run build --workspace @razroo/parallel-mcp-server",
     "build:testkit": "npm run build --workspace @razroo/parallel-mcp-testkit",
     "build:postgres": "npm run build --workspace @razroo/parallel-mcp-postgres",
-    "build:all": "npm run build && npm run build:server && npm run build:testkit && npm run build:postgres",
+    "build:memory": "npm run build --workspace @razroo/parallel-mcp-memory",
+    "build:all": "npm run build && npm run build:server && npm run build:testkit && npm run build:postgres && npm run build:memory",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit && npm run check --workspaces --if-present",
     "test": "vitest run",
     "test:server": "npm run test --workspace @razroo/parallel-mcp-server",
     "test:testkit": "npm run test --workspace @razroo/parallel-mcp-testkit",
     "test:postgres": "npm run test --workspace @razroo/parallel-mcp-postgres",
-    "test:all": "npm run test && npm run test:server && npm run test:testkit && npm run test:postgres",
+    "test:memory": "npm run test --workspace @razroo/parallel-mcp-memory",
+    "test:all": "npm run test && npm run test:server && npm run test:testkit && npm run test:postgres && npm run test:memory",
     "test:watch": "vitest",
     "prepublishOnly": "npm run check && npm test && npm run build",
     "pack:check": "npm run prepublishOnly && npm pack --dry-run",
     "example:fan-out": "tsx examples/fan-out.ts",
     "example:retry-and-resume": "tsx examples/retry-and-resume.ts",
     "example:multi-worker": "tsx examples/multi-worker.ts",
+    "example:async-dlq-triage": "tsx examples/async-dlq-triage.ts",
     "bench:claims": "tsx bench/claim-throughput.ts",
+    "bench:claims:async": "tsx bench/claim-throughput-async.ts",
     "docs:api": "typedoc"
   },
   "keywords": [

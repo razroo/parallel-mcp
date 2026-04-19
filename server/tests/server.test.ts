@@ -80,6 +80,7 @@ describe('parallel-mcp MCP server', () => {
         'get_run',
         'get_task',
         'heartbeat_lease',
+        'list_dead_tasks',
         'list_events_since',
         'list_pending_tasks',
         'list_run_events',
@@ -89,6 +90,7 @@ describe('parallel-mcp MCP server', () => {
         'pause_task',
         'prune_runs',
         'release_task',
+        'requeue_dead_task',
         'resume_task',
       ].sort(),
     )
@@ -267,6 +269,71 @@ describe('parallel-mcp MCP server', () => {
       run: unknown | null
     }
     expect(after.run).toBeNull()
+  })
+
+  it('enqueue_task round-trips timeoutMs onto the task record', async () => {
+    const { client, handle } = await connectInMemoryPair()
+    handles.push(handle)
+
+    const run = (await call(client, 'create_run', { namespace: 'timeouts' })) as {
+      run: { id: string }
+    }
+
+    const enqueued = (await call(client, 'enqueue_task', {
+      runId: run.run.id,
+      kind: 'work',
+      timeoutMs: 2500,
+    })) as { task: { id: string; timeoutMs: number | null } }
+
+    expect(enqueued.task.timeoutMs).toBe(2500)
+
+    const fetched = (await call(client, 'get_task', { taskId: enqueued.task.id })) as {
+      task: { timeoutMs: number | null }
+    }
+    expect(fetched.task.timeoutMs).toBe(2500)
+  })
+
+  it('list_dead_tasks + requeue_dead_task round-trip via MCP', async () => {
+    const { client, handle } = await connectInMemoryPair()
+    handles.push(handle)
+
+    const run = (await call(client, 'create_run', { namespace: 'dlq-mcp' })) as {
+      run: { id: string }
+    }
+
+    const enqueued = (await call(client, 'enqueue_task', {
+      runId: run.run.id,
+      kind: 'work',
+      maxAttempts: 1,
+    })) as { task: { id: string } }
+
+    await call(client, 'claim_next_task', {
+      workerId: 'w1',
+      leaseMs: 10,
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 30))
+    await call(client, 'expire_leases', {})
+
+    const dead = (await call(client, 'list_dead_tasks', { runId: run.run.id })) as {
+      tasks: Array<{ id: string; dead: boolean; status: string }>
+    }
+    expect(dead.tasks.map(t => t.id)).toEqual([enqueued.task.id])
+    expect(dead.tasks[0]?.dead).toBe(true)
+    expect(dead.tasks[0]?.status).toBe('failed')
+
+    const requeued = (await call(client, 'requeue_dead_task', {
+      taskId: enqueued.task.id,
+      reason: 'operator replay',
+    })) as { task: { id: string; status: string; dead: boolean; attemptCount: number } }
+    expect(requeued.task.status).toBe('queued')
+    expect(requeued.task.dead).toBe(false)
+    expect(requeued.task.attemptCount).toBe(0)
+
+    const stillDead = (await call(client, 'list_dead_tasks', { runId: run.run.id })) as {
+      tasks: unknown[]
+    }
+    expect(stillDead.tasks).toEqual([])
   })
 
   it('surfaces typed errors from the core as MCP tool errors', async () => {

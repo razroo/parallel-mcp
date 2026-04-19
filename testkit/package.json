@@ -1,6 +1,6 @@
 {
   "name": "@razroo/parallel-mcp-testkit",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Conformance test suite for alternative @razroo/parallel-mcp orchestrator/store implementations",
   "license": "MIT",
   "type": "module",

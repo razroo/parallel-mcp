@@ -3,7 +3,7 @@
  * `../../src/schema.ts` with the expected idiomatic differences:
  *
  *   - `TEXT` stays `TEXT` (Postgres has no `VARCHAR(255)` performance hit).
- *   - `JSON` columns become `JSONB` with a GIN index where we actually filter.
+ *   - `JSON` columns become `JSONB`.
  *   - `BIGSERIAL` for `events.id` (monotonic event cursor).
  *   - `TIMESTAMPTZ` for every timestamp.
  *   - Indexes named with a `pmcp_` prefix so they're easy to find.
@@ -13,6 +13,9 @@
  * through a migration tool. For production you will almost certainly want
  * something like `node-pg-migrate` or `drizzle-kit` managing this, but the
  * canonical shape lives here.
+ *
+ * Columns track the current SQLite schema exactly, including `timeout_ms`
+ * and `dead` on `tasks` added in core v0.4.
  */
 export const POSTGRES_SCHEMA = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -47,6 +50,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   retry_delay_ms INTEGER,
   retry_backoff TEXT CHECK (retry_backoff IN ('fixed','exponential')),
   retry_max_delay_ms INTEGER,
+  timeout_ms INTEGER,
   not_before TIMESTAMPTZ,
   input JSONB,
   output JSONB,
@@ -56,6 +60,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   lease_id TEXT,
   leased_by TEXT,
   lease_expires_at TIMESTAMPTZ,
+  dead BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   started_at TIMESTAMPTZ,
@@ -71,6 +76,12 @@ CREATE INDEX IF NOT EXISTS pmcp_tasks_status_kind_idx
 
 CREATE INDEX IF NOT EXISTS pmcp_tasks_not_before_idx
   ON tasks (status, not_before);
+
+CREATE INDEX IF NOT EXISTS pmcp_tasks_claim_idx
+  ON tasks (status, priority DESC, created_at ASC);
+
+CREATE INDEX IF NOT EXISTS pmcp_tasks_dead_idx
+  ON tasks (dead) WHERE dead;
 
 CREATE TABLE IF NOT EXISTS task_dependencies (
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -121,6 +132,20 @@ CREATE INDEX IF NOT EXISTS pmcp_task_leases_active_idx
 CREATE INDEX IF NOT EXISTS pmcp_task_leases_expires_idx
   ON task_leases (expires_at) WHERE status = 'active';
 
+CREATE UNIQUE INDEX IF NOT EXISTS pmcp_task_leases_client_token_unique
+  ON task_leases (client_token) WHERE client_token IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS task_completions (
+  client_token TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  outcome TEXT NOT NULL CHECK (outcome IN ('completed','failed')),
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS pmcp_task_completions_task_idx
+  ON task_completions (task_id);
+
 CREATE TABLE IF NOT EXISTS context_snapshots (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -150,12 +175,4 @@ CREATE INDEX IF NOT EXISTS pmcp_events_run_id_idx
 
 CREATE INDEX IF NOT EXISTS pmcp_events_id_idx
   ON events (id);
-
-CREATE TABLE IF NOT EXISTS client_completions (
-  client_token TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  terminal_status TEXT NOT NULL CHECK (terminal_status IN ('completed','failed')),
-  recorded_at TIMESTAMPTZ NOT NULL
-);
 `

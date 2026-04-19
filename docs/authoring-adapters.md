@@ -123,3 +123,99 @@ orchestrator.transaction(() => {
   orchestrator.enqueueTask({ runId, kind: 'site.apply', contextSnapshotId: snapshot.id })
 })
 ```
+
+## Writing an async adapter (Postgres, a remote service, etc.)
+
+Targets other than in-process SQLite should implement
+[`AsyncParallelMcpStore`](../src/async-store.ts) instead of
+`ParallelMcpStore`. Every method returns `Promise<T>`, which lets you
+back the store with a real async driver (`pg`, `mysql2`, a REST client,
+a message queue) without faking a synchronous surface.
+
+The async orchestrator is [`AsyncParallelMcpOrchestrator`](../src/async-orchestrator.ts).
+Its API is a 1:1 async copy of `ParallelMcpOrchestrator`:
+
+```ts
+import {
+  AsyncParallelMcpOrchestrator,
+  runWorker,
+} from '@razroo/parallel-mcp'
+import { PostgresParallelMcpStore } from '@razroo/parallel-mcp-postgres'
+import pg from 'pg'
+
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL })
+const store = new PostgresParallelMcpStore({ pool, autoMigrate: true })
+await store.migrate()
+
+const orchestrator = new AsyncParallelMcpOrchestrator(store, {
+  defaultLeaseMs: 30_000,
+})
+```
+
+`runWorker` accepts either orchestrator flavor — handlers themselves
+stay `async` regardless.
+
+### Validating your adapter
+
+Point the async conformance suite at your implementation before
+shipping. It covers the full lifecycle, DLQ, idempotency, context
+snapshots, lease expiry, cancellation, and admin introspection.
+
+```ts
+// adapters/<mine>/tests/conformance.test.ts
+import { AsyncParallelMcpOrchestrator } from '@razroo/parallel-mcp'
+import { runAsyncConformanceSuite } from '@razroo/parallel-mcp-testkit'
+import { MyAdapterStore } from '../src/index.js'
+
+runAsyncConformanceSuite({
+  label: 'my-adapter',
+  createOrchestrator: async () => ({
+    orchestrator: new AsyncParallelMcpOrchestrator(new MyAdapterStore(), {
+      defaultLeaseMs: 500,
+    }),
+  }),
+})
+```
+
+The [`@razroo/parallel-mcp-memory`](../adapters/memory/) workspace is
+the minimum viable reference implementation — 22/22 on the async
+conformance suite in ~300 lines of in-memory state. Read its `store.ts`
+top-to-bottom if you want a template without any SQL noise.
+
+### Bridging a sync store into the async world
+
+If you have an existing `ParallelMcpStore` (e.g. `SqliteParallelMcpStore`)
+and a consumer that needs the async API, wrap it with `toAsyncStore`:
+
+```ts
+import {
+  AsyncParallelMcpOrchestrator,
+  SqliteParallelMcpStore,
+  toAsyncStore,
+} from '@razroo/parallel-mcp'
+
+const sync = new SqliteParallelMcpStore({ filename: '/var/lib/pmcp/state.sqlite' })
+const orchestrator = new AsyncParallelMcpOrchestrator(toAsyncStore(sync))
+```
+
+Caveat: `toAsyncStore(sync).transaction(fn)` can only guarantee
+isolation when `fn` is synchronous. If you need to `await` inside a
+transaction, either use an adapter that implements native async
+transactions (Postgres does) or pre-compute the async work before
+entering the transaction.
+
+## Dead-letter queue and task timeouts
+
+Two orchestrator features that adapters should know about:
+
+- **`timeoutMs` on `enqueueTask`** — a hard per-attempt wall-clock
+  budget. When set, `runWorker` aborts the handler's `AbortSignal`
+  after `timeoutMs` and records a timeout-fail outcome (still honouring
+  `maxAttempts` + retry backoff). Independent of `leaseMs`, which only
+  handles crash detection.
+- **Dead-letter queue** — once a task has burnt through `maxAttempts`
+  via lease expiry, the orchestrator marks it `dead: true` and stops
+  handing it to workers. Use `orchestrator.listDeadTasks()` to triage
+  and `orchestrator.requeueDeadTask({ taskId })` to revive. The
+  corresponding typed events are `task.dead_lettered` and
+  `task.requeued_from_dlq`.

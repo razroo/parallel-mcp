@@ -1,10 +1,9 @@
 {
   "name": "@razroo/parallel-mcp-postgres",
-  "version": "0.1.0-alpha.0",
-  "description": "Postgres adapter for @razroo/parallel-mcp — work in progress reference implementation",
+  "version": "0.1.0-beta.0",
+  "description": "Postgres adapter for @razroo/parallel-mcp — full AsyncParallelMcpStore implementation",
   "license": "MIT",
   "type": "module",
-  "private": true,
   "repository": {
     "type": "git",
     "url": "git+https://github.com/razroo/parallel-mcp.git",
@@ -40,7 +39,11 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepack": "node ./scripts/prepack.mjs",
+    "postpack": "node ./scripts/postpack.mjs",
+    "prepublishOnly": "npm run check && npm test && npm run build",
+    "pack:check": "npm run prepublishOnly && npm pack --dry-run"
   },
   "keywords": [
     "mcp",

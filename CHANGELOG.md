@@ -8,7 +8,93 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html). All three
 workspace packages share a single version line: a release tagged `vX.Y.Z`
 publishes all three at the same version.
 
-## [Unreleased]
+## [0.4.0] - 2026-04-18
+
+### Added
+- **Core**: `AsyncParallelMcpStore` interface — the async counterpart to
+  `ParallelMcpStore`. Every method returns `Promise<T>`, so adapters that
+  speak to truly asynchronous backends (Postgres, a remote service, a
+  queue) don't have to fake a synchronous surface. `ParallelMcpStore`
+  (sync) remains the primary interface for in-process SQLite.
+- **Core**: `AsyncParallelMcpOrchestrator` — full parity with
+  `ParallelMcpOrchestrator` but async-first. Constructed with any
+  `AsyncParallelMcpStore` implementation.
+- **Core**: `toAsyncStore(sync)` adapter that lifts a synchronous
+  `ParallelMcpStore` into an `AsyncParallelMcpStore`. Useful for sharing
+  one SQLite store between sync and async consumers and for running the
+  async conformance suite against the reference sync implementation.
+  `transaction(fn)` is deliberately strict: it rejects `async` callbacks
+  and rejects callbacks that return a still-pending Promise, because a
+  sync store can't isolate writes across `await` boundaries. Use a
+  native `AsyncParallelMcpStore` when you need that.
+- **Core**: dead-letter queue. Tasks whose `maxAttempts` budget is
+  exhausted via lease expiry are now marked `dead: true` and moved out
+  of the claim path instead of silently losing the attempt. New
+  orchestrator methods: `listDeadTasks({ runId?, kinds?, limit?, offset? })`,
+  `requeueDeadTask({ taskId, resetAttempts?, notBefore?, reason? })`.
+  New typed events: `task.dead_lettered`, `task.requeued_from_dlq`.
+- **Core**: per-attempt `timeoutMs` on `enqueueTask`. When set,
+  `runWorker` aborts the handler's `AbortSignal` after `timeoutMs`
+  elapses and records a `task_timeout_exceeded:<ms>ms` failure
+  (respecting `maxAttempts` + retry backoff). Independent of `leaseMs`,
+  which governs crash-detection only. Surfaced on
+  `onHandlerEnd({ outcome: { status: 'task_timeout', timeoutMs } })`.
+- **Testkit**: `runAsyncConformanceSuite` — async counterpart of
+  `runConformanceSuite`. Drives an `AsyncParallelMcpOrchestrator` through
+  the full lifecycle, DLQ, idempotency, and cancellation suites. Ships
+  alongside the existing sync `runConformanceSuite`. New
+  `supportsAwaitedTransactions` option lets sync-backed async stores
+  (`toAsyncStore`-wrapped) opt out of the await-spanning transaction
+  test.
+- **Adapters**: `@razroo/parallel-mcp-postgres` promoted from alpha stub
+  to **beta** (`0.1.0-beta.0`). `PostgresParallelMcpStore` is now a
+  complete `AsyncParallelMcpStore` built on `pg`, using
+  `SELECT ... FOR UPDATE SKIP LOCKED` for atomic task claims and
+  explicit `BEGIN/COMMIT` blocks for multi-write atomicity. Schema
+  covers `timeout_ms`, `dead`, and `task_completions`. Live conformance
+  suite runs against a real Postgres when `DATABASE_URL` is set.
+- **Adapters**: new `@razroo/parallel-mcp-memory` (`0.1.0`) — a tiny,
+  dependency-free, non-durable reference `AsyncParallelMcpStore` for
+  demos, tests, and adapter-author onboarding. Passes the full async
+  conformance suite.
+- **Server**: three new MCP tools — `enqueue_task` now accepts
+  `timeoutMs`; `list_dead_tasks` and `requeue_dead_task` expose the DLQ
+  to MCP clients. End-to-end round-trip tests included. (The server
+  still drives the sync orchestrator; an async variant is planned.)
+- **Examples**: new `examples/async-dlq-triage.ts` — end-to-end demo of
+  `AsyncParallelMcpOrchestrator` + `MemoryParallelMcpStore` + a
+  hand-rolled async worker loop + DLQ triage / replay.
+- **Bench**: new `bench/claim-throughput-async.ts` + `npm run
+  bench:claims:async`. Benches the async claim path against
+  `MemoryParallelMcpStore` by default, `PostgresParallelMcpStore` when
+  `--store=postgres` and `DATABASE_URL` are set.
+- **CI**: live Postgres conformance job (spins up `postgres:16` as a
+  service and runs the async conformance suite against it); memory
+  adapter test + build job wired into the matrix and the
+  `compat-sqlite` floor.
+- **Release**: `release.yml` now packs, versions, and publishes
+  `@razroo/parallel-mcp-postgres` and `@razroo/parallel-mcp-memory`
+  alongside core/server/testkit, skipping re-publishes when the
+  adapter's version is already on npm (adapters track independent
+  pre-1.0 version lines).
+- **Docs**: README, `docs/failure-modes.md`, and `docs/authoring-
+  adapters.md` updated with async, DLQ, `timeoutMs`, and memory/
+  postgres adapter coverage.
+
+### Changed
+- Core, server, and testkit bumped to `0.4.0`. Testkit
+  `peerDependencies."@razroo/parallel-mcp"` stays at `>=0.3.0 <1.0.0`
+  because no breaking changes shipped.
+
+### Known limitations
+- `runWorker` still drives only the sync `ParallelMcpOrchestrator`.
+  Async callers drive `claimNextTask` / `markTaskRunning` /
+  `completeTask` / `failTask` directly (see
+  `examples/async-dlq-triage.ts`). A first-class `runAsyncWorker` is
+  planned for a follow-up release.
+- The MCP server adapter exposes only the sync orchestrator today.
+  Pair it with `toAsyncStore` + a sync store when you need MCP-level
+  access to an async-first deployment.
 
 ## [0.3.0] - 2026-04-19
 
@@ -132,6 +218,8 @@ publishes all three at the same version.
 - **CI/Release**: tag-driven `release.yml` that validates `vX.Y.Z` matches
   the package version before publishing to npm with provenance.
 
-[Unreleased]: https://github.com/razroo/parallel-mcp/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/razroo/parallel-mcp/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/razroo/parallel-mcp/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/razroo/parallel-mcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/razroo/parallel-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/razroo/parallel-mcp/releases/tag/v0.1.0

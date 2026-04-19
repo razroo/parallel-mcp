@@ -29,13 +29,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Validate tag matches every workspace version
+      - name: Validate tag matches core / server / testkit versions
         id: version
         shell: bash
         run: |
           CORE_VERSION="$(node -p "require('./package.json').version")"
           SERVER_VERSION="$(node -p "require('./server/package.json').version")"
           TESTKIT_VERSION="$(node -p "require('./testkit/package.json').version")"
+          POSTGRES_VERSION="$(node -p "require('./adapters/postgres/package.json').version")"
+          MEMORY_VERSION="$(node -p "require('./adapters/memory/package.json').version")"
           if [[ "${GITHUB_REF_NAME}" != "v${CORE_VERSION}" ]]; then
             echo "Tag ${GITHUB_REF_NAME} does not match core version v${CORE_VERSION}" >&2
             exit 1
@@ -49,6 +51,8 @@ jobs:
             exit 1
           fi
           echo "package_version=${CORE_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "postgres_version=${POSTGRES_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "memory_version=${MEMORY_VERSION}" >> "${GITHUB_OUTPUT}"
 
       - name: Build core (required before server/testkit typecheck)
         run: npm run build
@@ -59,8 +63,8 @@ jobs:
       - name: Test (all workspaces)
         run: npm run test:all
 
-      - name: Build server + testkit + postgres adapter
-        run: npm run build:server && npm run build:testkit && npm run build:postgres
+      - name: Build server + testkit + postgres + memory
+        run: npm run build:server && npm run build:testkit && npm run build:postgres && npm run build:memory
 
       - name: Pack core
         id: pack_core
@@ -85,6 +89,22 @@ jobs:
           PACKAGE_TGZ="$(npm pack --silent | tail -n 1)"
           echo "package_tgz=testkit/${PACKAGE_TGZ}" >> "${GITHUB_OUTPUT}"
 
+      - name: Pack postgres adapter
+        id: pack_postgres
+        shell: bash
+        working-directory: adapters/postgres
+        run: |
+          PACKAGE_TGZ="$(npm pack --silent | tail -n 1)"
+          echo "package_tgz=adapters/postgres/${PACKAGE_TGZ}" >> "${GITHUB_OUTPUT}"
+
+      - name: Pack memory adapter
+        id: pack_memory
+        shell: bash
+        working-directory: adapters/memory
+        run: |
+          PACKAGE_TGZ="$(npm pack --silent | tail -n 1)"
+          echo "package_tgz=adapters/memory/${PACKAGE_TGZ}" >> "${GITHUB_OUTPUT}"
+
       - name: Publish core to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -102,6 +122,32 @@ jobs:
         working-directory: testkit
         run: npm publish --access public --provenance
 
+      - name: Publish postgres adapter to npm (skip if version already published)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          POSTGRES_VERSION: ${{ steps.version.outputs.postgres_version }}
+        working-directory: adapters/postgres
+        shell: bash
+        run: |
+          if [[ -n "$(npm view @razroo/parallel-mcp-postgres@${POSTGRES_VERSION} version 2>/dev/null)" ]]; then
+            echo "@razroo/parallel-mcp-postgres@${POSTGRES_VERSION} already on npm — skipping"
+            exit 0
+          fi
+          npm publish --access public --provenance
+
+      - name: Publish memory adapter to npm (skip if version already published)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          MEMORY_VERSION: ${{ steps.version.outputs.memory_version }}
+        working-directory: adapters/memory
+        shell: bash
+        run: |
+          if [[ -n "$(npm view @razroo/parallel-mcp-memory@${MEMORY_VERSION} version 2>/dev/null)" ]]; then
+            echo "@razroo/parallel-mcp-memory@${MEMORY_VERSION} already on npm — skipping"
+            exit 0
+          fi
+          npm publish --access public --provenance
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -110,4 +156,6 @@ jobs:
             "${{ steps.pack_core.outputs.package_tgz }}" \
             "${{ steps.pack_server.outputs.package_tgz }}" \
             "${{ steps.pack_testkit.outputs.package_tgz }}" \
+            "${{ steps.pack_postgres.outputs.package_tgz }}" \
+            "${{ steps.pack_memory.outputs.package_tgz }}" \
             --generate-notes

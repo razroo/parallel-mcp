@@ -32,7 +32,8 @@ propagated as plain `Error`.
 | Two workers claim at the same instant             | `claimNextTask` uses `BEGIN IMMEDIATE` + conditional `UPDATE`; only one worker wins                                         | Loser gets `null` (or a different task); no special handling                                     |
 | Duplicate `completeTask` / `failTask` retry       | Without `clientToken`: second call raises `LeaseConflictError` (lease is gone). With `clientToken`: returns the same result | Always pass a stable `clientToken` when the caller might retry across process restarts           |
 | Duplicate `claimNextTask` retry                   | With `clientToken`: returns the same claim. Without: a second active lease is impossible, so you'll just get a new task     | Generate `clientToken` per claim attempt, keep it until the task is terminal                     |
-| Task keeps failing                                | After `attemptCount >= maxAttempts`, the task is force-marked `failed` with `error = 'max_attempts_exceeded'`                | Inspect `listEventsSince({ eventTypes: ['task.failed'] })` to route to dead-letter handling      |
+| Task keeps failing                                | After `attemptCount >= maxAttempts`, the task is force-marked `failed` with `error = 'max_attempts_exceeded'` **and moved to the dead-letter queue** (`dead = true`). `claimNextTask` will never return it again | Poll `listDeadTasks({ runId?, kinds?, limit? })` (or subscribe to `task.dead_lettered` events) and decide per task whether to drop, alert, or `requeueDeadTask({ taskId, resetAttempts? })` — which emits `task.requeued_from_dlq` |
+| Attempt exceeds its wall-clock budget             | `enqueueTask({ timeoutMs })` arms a per-attempt timeout. `runWorker` aborts the handler's `AbortSignal` after `timeoutMs` and reports a timeout-fail. Retries respect `maxAttempts` / `retry` normally        | Always honour `signal` inside handlers (propagate to `fetch`, Playwright, subprocesses). `timeoutMs` is independent of `leaseMs`, which is purely a crash-detection signal |
 | Dependency not ready                              | `claimNextTask` silently skips tasks whose `dependsOnTaskIds` have not all completed                                        | Don't poll individual tasks — just keep calling `claimNextTask`                                  |
 | Task needs human input                            | Use `pauseTask({ status: 'waiting_input' })` — the task leaves the queue                                                    | Call `resumeTask` once input is ready; the task returns to `queued`                              |
 | Run is cancelled                                  | `cancelRun` transitions all non-terminal tasks to `cancelled`, marks all active leases/attempts cancelled                   | Workers holding a lease on a cancelled task will get `InvalidTransitionError` on their next write — treat as "abandon this task" |
@@ -53,3 +54,11 @@ const orchestrator = new ParallelMcpOrchestrator(store, {
 For reliable fan-out to durable subscribers (cross-process), poll
 `listEventsSince({ afterId: cursor, limit })` and persist `nextCursor` after
 each batch.
+
+Relevant event types for the failure-mode matrix above:
+
+- `task.failed` — final failure after the worker wrote `failTask` or after lease-expiry retries were exhausted. When `runWorker` aborts a handler because `timeoutMs` elapsed, it writes `failTask` with `error = "task_timeout_exceeded:<ms>ms"`, which surfaces through this same event.
+- `task.dead_lettered` — emitted once when the task is moved to the dead-letter queue
+- `task.requeued_from_dlq` — emitted when `requeueDeadTask` revives a dead task (includes the reason)
+
+These event types are stable; adapter authors should emit them verbatim so triage tooling stays portable.

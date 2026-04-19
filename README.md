@@ -14,10 +14,13 @@ It is not another MCP transport or browser automation server. The package exists
 - Dependency-aware task claiming for parallel workers
 - Lease acquisition, heartbeat, release, and expiry
 - Retry policies with `maxAttempts` enforcement and fixed/exponential backoff
+- Per-attempt `timeoutMs` wall-clock budget with `AbortSignal`-driven handler cancellation
+- Dead-letter queue for tasks that exhaust `maxAttempts` — triage with `listDeadTasks` / `requeueDeadTask`
 - Explicit paused states: `blocked` and `waiting_input`
 - Run-level context snapshots instead of implicit shared memory
 - Append-only events for replay, debugging, and auditing
 - Versioned schema migrations
+- Dual sync (`ParallelMcpStore`) and async (`AsyncParallelMcpStore`) store contracts — pick the one that matches your backend
 
 ## What it does not do
 
@@ -133,8 +136,37 @@ orchestrator.enqueueTask({
 
 When a lease expires:
 
-- `attempt_count >= maxAttempts` → task transitions to `failed` with `error = 'max_attempts_exceeded'`.
+- `attempt_count >= maxAttempts` → task transitions to `failed` with `error = 'max_attempts_exceeded'` and is moved to the **dead-letter queue** (`dead = true`). It will not be handed to workers again until an operator requeues it.
 - Otherwise the task is requeued with `not_before = now + computedDelay`. `claimNextTask` will not return tasks whose `not_before` is in the future.
+
+### Per-attempt `timeoutMs`
+
+`enqueueTask({ timeoutMs })` sets a hard wall-clock budget for a single attempt. The worker (`runWorker`) aborts the handler's `AbortSignal` after `timeoutMs` elapses and records a timeout-fail outcome — the task then retries normally, respecting `maxAttempts` and retry backoff. `timeoutMs` is independent of `leaseMs`, which is purely a crash-detection signal.
+
+```ts
+orchestrator.enqueueTask({
+  runId: run.id,
+  kind: 'site.apply',
+  timeoutMs: 60_000,
+  maxAttempts: 3,
+  retry: { delayMs: 5_000, backoff: 'exponential' },
+})
+```
+
+### Dead-letter queue
+
+Tasks that exhaust their attempt budget via lease expiry are parked in the dead-letter queue instead of silently dropped. Two orchestrator methods drive the triage loop:
+
+```ts
+const dead = orchestrator.listDeadTasks({ runId, kinds: ['site.apply'] })
+
+for (const task of dead) {
+  console.log(task.id, task.error, task.attemptCount)
+  orchestrator.requeueDeadTask({ taskId: task.id, reason: 'operator replay' })
+}
+```
+
+`requeueDeadTask` resets `attemptCount` to `0` by default (pass `resetAttempts: false` to preserve it) and emits a `task.requeued_from_dlq` event so the replay is auditable. The original dead-lettering emits `task.dead_lettered`.
 
 ## Worker loop
 
@@ -169,6 +201,60 @@ Handler return values map 1:1 to orchestrator state transitions:
 - `{ status: 'released', reason? }` → `releaseTask` (requeues without consuming an attempt)
 
 If the handler throws, the task is failed with the error message. An `onError` option is available for observability.
+
+## Async store and orchestrator
+
+The default `ParallelMcpOrchestrator` + `SqliteParallelMcpStore` pair is synchronous because `better-sqlite3` is synchronous. For backends that are truly async (Postgres, a remote service, a queue) the package ships a parallel `AsyncParallelMcpStore` contract and an `AsyncParallelMcpOrchestrator` facade with 1:1 feature parity:
+
+```ts
+import { AsyncParallelMcpOrchestrator } from '@razroo/parallel-mcp'
+import { PostgresParallelMcpStore } from '@razroo/parallel-mcp-postgres'
+import pg from 'pg'
+
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL })
+const store = new PostgresParallelMcpStore({ pool, autoMigrate: true })
+await store.migrate()
+
+const orchestrator = new AsyncParallelMcpOrchestrator(store, { defaultLeaseMs: 30_000 })
+
+for (;;) {
+  const claim = await orchestrator.claimNextTask({ workerId: 'worker-1' })
+  if (!claim) {
+    await new Promise(r => setTimeout(r, 200))
+    continue
+  }
+  await orchestrator.markTaskRunning({
+    taskId: claim.task.id,
+    leaseId: claim.lease.id,
+    workerId: claim.lease.workerId,
+  })
+  try {
+    const output = await doTheWork(claim.task.input)
+    await orchestrator.completeTask({
+      taskId: claim.task.id,
+      leaseId: claim.lease.id,
+      workerId: claim.lease.workerId,
+      output,
+    })
+  } catch (error) {
+    await orchestrator.failTask({
+      taskId: claim.task.id,
+      leaseId: claim.lease.id,
+      workerId: claim.lease.workerId,
+      error: (error as Error).message,
+    })
+  }
+}
+```
+
+`runWorker` (the packaged helper that owns claim / heartbeat / drain / timeout) is currently sync-only — it drives `ParallelMcpOrchestrator`. Driving `AsyncParallelMcpOrchestrator` means hand-rolling the loop, as above, or using the `toAsyncStore` escape hatch when the backing store is sync. A first-class `runAsyncWorker` is on the roadmap for a follow-up release.
+
+Two first-party adapters live in this repo:
+
+- [`@razroo/parallel-mcp-memory`](./adapters/memory/) — a tiny, non-durable, dependency-free reference implementation. Great for tests, demos, and adapter-author onboarding. Passes the full async conformance suite.
+- [`@razroo/parallel-mcp-postgres`](./adapters/postgres/) — a complete `AsyncParallelMcpStore` on `pg`, using `SELECT ... FOR UPDATE SKIP LOCKED` for atomic claims and real `BEGIN/COMMIT` transactions. Runs the live conformance suite in CI.
+
+If you need to expose an existing `ParallelMcpStore` (e.g. `SqliteParallelMcpStore`) through the async API, wrap it with `toAsyncStore(sync)`. See [`docs/authoring-adapters.md`](./docs/authoring-adapters.md) for the full adapter-author guide, including the transaction-isolation caveat of `toAsyncStore`.
 
 ## Concurrency model
 
@@ -218,7 +304,7 @@ npm run example:fan-out
 
 ## API surface
 
-`ParallelMcpOrchestrator` is a thin facade over `SqliteParallelMcpStore`. Both are exported, along with the full set of record and option types and error classes.
+`ParallelMcpOrchestrator` is a thin facade over `SqliteParallelMcpStore`. `AsyncParallelMcpOrchestrator` is its async twin over any `AsyncParallelMcpStore`. Both are exported, along with the full set of record and option types and error classes. Every method below exists on both orchestrators with the same signature — the async version returns `Promise<T>`.
 
 Runs:
 
@@ -228,7 +314,7 @@ Runs:
 
 Tasks:
 
-- `enqueueTask({ runId, kind, key?, priority?, maxAttempts?, input?, metadata?, dependsOnTaskIds?, ... })`
+- `enqueueTask({ runId, kind, key?, priority?, maxAttempts?, retry?, timeoutMs?, input?, metadata?, dependsOnTaskIds?, ... })`
 - `claimNextTask({ workerId, leaseMs?, kinds?, clientToken?, now? })`
 - `markTaskRunning({ taskId, leaseId, workerId })`
 - `pauseTask({ taskId, leaseId, workerId, status: 'blocked' | 'waiting_input', reason? })`
@@ -238,6 +324,11 @@ Tasks:
 - `releaseTask({ taskId, leaseId, workerId, reason? })`
 - `getTask(taskId)`
 - `listRunTasks(runId)`
+
+Dead-letter queue:
+
+- `listDeadTasks({ runId?, kinds?, limit?, offset? })` — tasks parked after exhausting `maxAttempts`
+- `requeueDeadTask({ taskId, resetAttempts?, notBefore?, reason? })` — emits `task.requeued_from_dlq`
 
 Leases:
 
@@ -259,7 +350,7 @@ Introspection and retention:
 
 Transactions:
 
-- `transaction(fn)` runs `fn` inside an `IMMEDIATE` SQLite transaction so multiple writes commit or roll back as one unit
+- `transaction(fn)` runs `fn` inside an `IMMEDIATE` SQLite transaction (sync) or a real `BEGIN/COMMIT` (async native stores) so multiple writes commit or roll back as one unit. `toAsyncStore` can only isolate synchronous bodies — see [`docs/authoring-adapters.md`](./docs/authoring-adapters.md#bridging-a-sync-store-into-the-async-world).
 
 Workers:
 
@@ -297,26 +388,33 @@ If the worker dies, lease expiry re-queues the task. If a browser crashes, that 
 
 This version ships:
 
-- SQLite persistence with versioned migrations
+- SQLite persistence with versioned migrations (sync)
+- Native async `AsyncParallelMcpStore` / `AsyncParallelMcpOrchestrator` for Postgres and custom async backends
+- In-memory async reference adapter (`@razroo/parallel-mcp-memory`)
+- Full `AsyncParallelMcpStore` implementation on top of `pg` (`@razroo/parallel-mcp-postgres`, beta)
 - durable runs/tasks/attempts/leases/events
 - dependency-aware claiming
 - lease expiry and requeue
 - `maxAttempts` enforcement with fixed / exponential backoff
+- per-attempt `timeoutMs` with `AbortSignal` cancellation inside `runWorker`
+- dead-letter queue + triage (`listDeadTasks` / `requeueDeadTask`)
 - context snapshots
+- MCP server adapter exposing every public method as an MCP tool
 
 Next logical additions:
 
-- remote store backends
 - richer event subscription (push stream) in addition to the synchronous `onEvent` hook and the `listEventsSince` cursor
+- async variant of the MCP server so remote async stores can be driven over stdio without bridging through `toAsyncStore`
 
 See also:
 
 - [`docs/lifecycle.md`](./docs/lifecycle.md) — task / run state machine and event types
 - [`docs/failure-modes.md`](./docs/failure-modes.md) — typed errors and how to handle each failure
-- [`docs/authoring-adapters.md`](./docs/authoring-adapters.md) — writing an adapter with `runWorker`
-- [`testkit/`](./testkit) — `@razroo/parallel-mcp-testkit`, a drop-in Vitest conformance suite for alternative adapter implementations
-- [`adapters/postgres/`](./adapters/postgres) — `@razroo/parallel-mcp-postgres`, **alpha** reference Postgres adapter (ships the canonical schema today; full async store is in progress)
-- [`bench/`](./bench/) — local throughput bench for the claim path
+- [`docs/authoring-adapters.md`](./docs/authoring-adapters.md) — writing a sync or async adapter and running the conformance suite
+- [`testkit/`](./testkit) — `@razroo/parallel-mcp-testkit`, drop-in Vitest conformance suites (sync + async) for alternative adapter implementations
+- [`adapters/memory/`](./adapters/memory/) — `@razroo/parallel-mcp-memory`, the minimal async reference adapter
+- [`adapters/postgres/`](./adapters/postgres/) — `@razroo/parallel-mcp-postgres`, beta Postgres `AsyncParallelMcpStore`
+- [`bench/`](./bench/) — local throughput benches for the claim path (sync and async)
 
 ## MCP server adapter
 

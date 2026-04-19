@@ -3,7 +3,9 @@ import { z } from 'zod'
 import type {
   CreateRunOptions,
   EnqueueTaskOptions,
+  ListDeadTasksOptions,
   ParallelMcpOrchestrator,
+  RequeueDeadTaskOptions,
 } from '@razroo/parallel-mcp'
 
 type ToolHandlerResult = {
@@ -82,7 +84,8 @@ export function registerOrchestratorTools(server: McpServer, orchestrator: Paral
     'enqueue_task',
     {
       title: 'Enqueue task',
-      description: 'Enqueue a task onto an existing run. Supports dependencies, priority, maxAttempts, and a retry policy.',
+      description:
+        'Enqueue a task onto an existing run. Supports dependencies, priority, maxAttempts, retry policy, and an optional per-attempt timeoutMs wall-clock budget.',
       inputSchema: {
         id: z.string().optional(),
         runId: z.string(),
@@ -91,6 +94,7 @@ export function registerOrchestratorTools(server: McpServer, orchestrator: Paral
         priority: z.number().int().optional(),
         maxAttempts: z.number().int().positive().optional(),
         retry: retryPolicySchema.optional(),
+        timeoutMs: z.number().int().positive().optional(),
         input: jsonValueSchema.optional(),
         metadata: jsonValueSchema.optional(),
         contextSnapshotId: z.string().optional(),
@@ -114,6 +118,7 @@ export function registerOrchestratorTools(server: McpServer, orchestrator: Paral
           if (input.retry.maxDelayMs !== undefined) retry.maxDelayMs = input.retry.maxDelayMs
           options.retry = retry
         }
+        if (input.timeoutMs !== undefined) options.timeoutMs = input.timeoutMs
         if (input.input !== undefined) options.input = input.input
         if (input.metadata !== undefined) options.metadata = input.metadata
         if (input.contextSnapshotId !== undefined) options.contextSnapshotId = input.contextSnapshotId
@@ -628,6 +633,61 @@ export function registerOrchestratorTools(server: McpServer, orchestrator: Paral
           ...(input.limit !== undefined ? { limit: input.limit } : {}),
         })
         return jsonResult(result)
+      } catch (error) {
+        return errorResult(error)
+      }
+    },
+  )
+
+  server.registerTool(
+    'list_dead_tasks',
+    {
+      title: 'List dead tasks',
+      description:
+        'List tasks that have been moved to the dead-letter queue (attempt budget exhausted via lease expiry). Use requeue_dead_task to revive.',
+      inputSchema: {
+        runId: z.string().optional(),
+        kinds: z.array(z.string()).optional(),
+        limit: z.number().int().positive().max(1000).optional(),
+        offset: z.number().int().nonnegative().optional(),
+      },
+    },
+    async input => {
+      try {
+        const options: ListDeadTasksOptions = {}
+        if (input.runId !== undefined) options.runId = input.runId
+        if (input.kinds !== undefined) options.kinds = input.kinds
+        if (input.limit !== undefined) options.limit = input.limit
+        if (input.offset !== undefined) options.offset = input.offset
+        const tasks = orchestrator.listDeadTasks(options)
+        return jsonResult({ tasks })
+      } catch (error) {
+        return errorResult(error)
+      }
+    },
+  )
+
+  server.registerTool(
+    'requeue_dead_task',
+    {
+      title: 'Requeue dead task',
+      description:
+        'Move a task out of the dead-letter queue back to the queue. Emits task.requeued_from_dlq. Resets attemptCount by default.',
+      inputSchema: {
+        taskId: z.string(),
+        resetAttempts: z.boolean().optional(),
+        notBefore: z.string().optional(),
+        reason: z.string().optional(),
+      },
+    },
+    async input => {
+      try {
+        const options: RequeueDeadTaskOptions = { taskId: input.taskId }
+        if (input.resetAttempts !== undefined) options.resetAttempts = input.resetAttempts
+        if (input.notBefore !== undefined) options.notBefore = input.notBefore
+        if (input.reason !== undefined) options.reason = input.reason
+        const task = orchestrator.requeueDeadTask(options)
+        return jsonResult({ task })
       } catch (error) {
         return errorResult(error)
       }

@@ -1,32 +1,24 @@
 {
-  "name": "@razroo/parallel-mcp-server",
-  "version": "0.4.0",
-  "description": "MCP server that exposes @razroo/parallel-mcp orchestration tools over stdio",
+  "name": "@razroo/parallel-mcp-memory",
+  "version": "0.1.0",
+  "description": "Minimal in-memory AsyncParallelMcpStore reference adapter for @razroo/parallel-mcp",
   "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/razroo/parallel-mcp.git",
-    "directory": "server"
+    "directory": "adapters/memory"
   },
-  "homepage": "https://github.com/razroo/parallel-mcp/tree/main/server#readme",
+  "homepage": "https://github.com/razroo/parallel-mcp/tree/main/adapters/memory#readme",
   "bugs": {
     "url": "https://github.com/razroo/parallel-mcp/issues"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "bin": {
-    "parallel-mcp-server": "./dist/bin.js",
-    "parallel-mcp-server-http": "./dist/bin-http.js"
-  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./server": {
-      "types": "./dist/server.d.ts",
-      "import": "./dist/server.js"
     }
   },
   "publishConfig": {
@@ -51,17 +43,20 @@
   },
   "keywords": [
     "mcp",
-    "model-context-protocol",
     "parallel",
     "orchestration",
-    "stdio"
+    "in-memory",
+    "reference",
+    "adapter"
   ],
+  "peerDependencies": {
+    "@razroo/parallel-mcp": ">=0.3.0 <1.0.0"
+  },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "@razroo/parallel-mcp": "file:..",
-    "zod": "^3.23.8"
+    "@razroo/parallel-mcp": "file:../.."
   },
   "devDependencies": {
+    "@razroo/parallel-mcp-testkit": "file:../../testkit",
     "@types/node": "^25.6.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.4"
