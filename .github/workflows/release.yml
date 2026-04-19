@@ -50,14 +50,17 @@ jobs:
           fi
           echo "package_version=${CORE_VERSION}" >> "${GITHUB_OUTPUT}"
 
+      - name: Build core (required before server/testkit typecheck)
+        run: npm run build
+
       - name: Check (all workspaces)
         run: npm run check
 
       - name: Test (all workspaces)
         run: npm run test:all
 
-      - name: Build (all workspaces)
-        run: npm run build:all
+      - name: Build server + testkit
+        run: npm run build:server && npm run build:testkit
 
       - name: Pack core
         id: pack_core
