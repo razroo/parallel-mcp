@@ -105,22 +105,43 @@ jobs:
           PACKAGE_TGZ="$(npm pack --silent | tail -n 1)"
           echo "package_tgz=adapters/memory/${PACKAGE_TGZ}" >> "${GITHUB_OUTPUT}"
 
-      - name: Publish core to npm
+      - name: Publish core to npm (skip if version already published)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+        shell: bash
+        run: |
+          if [[ -n "$(npm view @razroo/parallel-mcp@${PACKAGE_VERSION} version 2>/dev/null)" ]]; then
+            echo "@razroo/parallel-mcp@${PACKAGE_VERSION} already on npm — skipping"
+            exit 0
+          fi
+          npm publish --access public --provenance
 
-      - name: Publish server to npm
+      - name: Publish server to npm (skip if version already published)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
         working-directory: server
-        run: npm publish --access public --provenance
+        shell: bash
+        run: |
+          if [[ -n "$(npm view @razroo/parallel-mcp-server@${PACKAGE_VERSION} version 2>/dev/null)" ]]; then
+            echo "@razroo/parallel-mcp-server@${PACKAGE_VERSION} already on npm — skipping"
+            exit 0
+          fi
+          npm publish --access public --provenance
 
-      - name: Publish testkit to npm
+      - name: Publish testkit to npm (skip if version already published)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
         working-directory: testkit
-        run: npm publish --access public --provenance
+        shell: bash
+        run: |
+          if [[ -n "$(npm view @razroo/parallel-mcp-testkit@${PACKAGE_VERSION} version 2>/dev/null)" ]]; then
+            echo "@razroo/parallel-mcp-testkit@${PACKAGE_VERSION} already on npm — skipping"
+            exit 0
+          fi
+          npm publish --access public --provenance
 
       - name: Publish postgres adapter to npm (skip if version already published)
         env:
@@ -148,14 +169,26 @@ jobs:
           fi
           npm publish --access public --provenance
 
-      - name: Create GitHub release
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            "${{ steps.pack_core.outputs.package_tgz }}" \
-            "${{ steps.pack_server.outputs.package_tgz }}" \
-            "${{ steps.pack_testkit.outputs.package_tgz }}" \
-            "${{ steps.pack_postgres.outputs.package_tgz }}" \
-            "${{ steps.pack_memory.outputs.package_tgz }}" \
-            --generate-notes
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} exists — uploading assets with --clobber"
+            gh release upload "${GITHUB_REF_NAME}" \
+              "${{ steps.pack_core.outputs.package_tgz }}" \
+              "${{ steps.pack_server.outputs.package_tgz }}" \
+              "${{ steps.pack_testkit.outputs.package_tgz }}" \
+              "${{ steps.pack_postgres.outputs.package_tgz }}" \
+              "${{ steps.pack_memory.outputs.package_tgz }}" \
+              --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              "${{ steps.pack_core.outputs.package_tgz }}" \
+              "${{ steps.pack_server.outputs.package_tgz }}" \
+              "${{ steps.pack_testkit.outputs.package_tgz }}" \
+              "${{ steps.pack_postgres.outputs.package_tgz }}" \
+              "${{ steps.pack_memory.outputs.package_tgz }}" \
+              --generate-notes
+          fi

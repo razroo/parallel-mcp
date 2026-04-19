@@ -8,6 +8,30 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html). All three
 workspace packages share a single version line: a release tagged `vX.Y.Z`
 publishes all three at the same version.
 
+## Adapter patch releases — 2026-04-18
+
+### `@razroo/parallel-mcp-memory@0.1.1` + `@razroo/parallel-mcp-postgres@0.1.0-beta.1`
+
+- **Fix**: `npm install @razroo/parallel-mcp-postgres@0.1.0-beta.0` could hang
+  in npm's dependency resolver because the registry metadata document for that
+  release still listed `"@razroo/parallel-mcp": "file:../.."` as a runtime
+  dependency. The published tarball already contained the correct rewritten
+  `"^0.4.0"` range, but npm resolves from the registry document first when it
+  has to reconcile other deps (e.g. `pg`), and the workspace-path entry sent
+  it into an infinite `placeDep` loop. Root cause: the adapter publish
+  lifecycle ran `postpack` between `pack` and the metadata upload, restoring
+  the original workspace-path dependency on disk before npm read it for the
+  registry document. Both adapters now run the restore script from
+  `postpublish` instead, so the rewritten `package.json` stays in place
+  through the registry upload. The same fix is mirrored in
+  `@razroo/parallel-mcp-server` and `@razroo/parallel-mcp-testkit`, which
+  were unaffected in practice (their consumers fall through to the tarball)
+  but were carrying the same stale workspace-path in their registry
+  documents.
+- No behavior or API changes inside the adapter code. Republishing under new
+  patch/beta numbers because npm does not allow re-publishing over an
+  existing version, even to fix a broken registry document.
+
 ## [0.4.0] - 2026-04-18
 
 ### Added
